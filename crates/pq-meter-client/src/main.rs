@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
     // connection is established with the first request.
     let client = Client::new(
         Config::new(args.endhost_api)
+            // A test token. Normally the SNAP hands out a token after authentication.
             .with_auth_token(snap_tokens::v0::dummy_snap_token())
             // The server uses a self-signed certificate, so its identity is not verified.
             .with_quic_config(QuicConfig::builder().verify_peer(false).build()),
