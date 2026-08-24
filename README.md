@@ -29,8 +29,11 @@ rust-toolchain.toml        Rust version used to build this repository
 ```
 
 Both programs are built on the [SCION endhost SDK](https://github.com/Anapaya/scion-sdk),
-pinned to one release in the workspace `Cargo.toml`. Its documentation lives at
-[docs.rs/scion-stack](https://docs.rs/scion-stack).
+pinned to one release in the workspace `Cargo.toml`. The
+[SCION SDK academy](https://learn.anapaya.net/docs/academy/scion-sdk/) explains the concepts
+behind it — autonomous systems, addresses, paths and segments — and is the place to read up
+when a term in this README is new to you. The API reference is on
+[docs.rs/scion-http3](https://docs.rs/scion-http3) and [docs.rs/scion-stack](https://docs.rs/scion-stack).
 
 ## How the pieces fit together
 
@@ -64,7 +67,8 @@ The server prints this URL when it starts.
 
 ## Try it on one machine
 
-You need Rust ([see below](#installing-rust)) and nothing else. In the first terminal:
+You need the [build tools](#installing-the-build-tools): Rust, cmake and a C/C++ compiler.
+In the first terminal:
 
 ```bash
 cargo run -p pq-meter-server
@@ -124,20 +128,38 @@ The printed URLs and addresses now use that IP address. Run the client on the Pi
 The server binds these ports on the address you pass, and all of them have to be reachable
 from the Pi:
 
-| Port  | What it is                                            |
-| ----- | ----------------------------------------------------- |
-| 31000 | endhost API of the gateway AS — the client uses this   |
-| 31001 | endhost API of the server AS — used inside the laptop  |
-| 31010 | SNAP control plane, gateway AS                        |
-| 31011 | SNAP data plane, gateway AS                           |
-| 31020 | SNAP control plane, server AS                         |
-| 31021 | SNAP data plane, server AS                            |
+| Port  | Protocol | What it is                                           |
+| ----- | -------- | ---------------------------------------------------- |
+| 31000 | TCP      | endhost API of the gateway AS — the client uses this  |
+| 31001 | TCP      | endhost API of the server AS — used inside the laptop |
+| 31010 | TCP      | SNAP control plane, gateway AS                       |
+| 31011 | UDP      | SNAP data plane, gateway AS                          |
+| 31020 | TCP      | SNAP control plane, server AS                        |
+| 31021 | UDP      | SNAP data plane, server AS                           |
 
 If the client hangs or reports a connection error, the usual cause is a firewall on the
-laptop. Allow incoming connections for the `pq-meter-server` binary, or open the ports
-above. On macOS the firewall asks once, in a dialog that is easy to miss.
+laptop that blocks these ports:
 
-## Installing Rust
+* **macOS** asks once, in a dialog that is easy to miss. Allow incoming connections for the
+  binary, or check *System Settings → Network → Firewall*.
+* **Windows** shows a similar dialog on the first start. Allow the binary for private
+  networks; if the dialog was dismissed, add the rule in *Windows Defender Firewall*.
+* **Linux** does not ask. If a firewall is running (`sudo ufw status`,
+  `sudo firewall-cmd --state`), open the ports above, or stop the firewall while you work.
+
+Two more things to check when the ports look fine:
+
+* A **VPN** on the laptop can capture the route to the network of the Pi. The packets of the
+  Pi still arrive, but the answers of the laptop leave through the VPN and never come back.
+  Check with `ip route get <pi-ip>` on Linux or `route -n get <pi-ip>` on macOS that the
+  answer leaves through your WLAN interface, and disconnect the VPN while you work.
+* The Pi and the laptop have to be on the **same network**, and it must not be a guest WLAN —
+  those often block traffic between devices.
+
+## Installing the build tools
+
+You need Rust, cmake and a C/C++ compiler. The last two are needed because the TLS library
+in the dependency tree is C code that is built from source.
 
 Install Rust with [rustup](https://rustup.rs/). It reads `rust-toolchain.toml` and fetches
 the version this repository is built with automatically.
@@ -146,15 +168,19 @@ the version this repository is built with automatically.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+sudo apt install build-essential cmake        # Debian and Ubuntu
 ```
 
 ### macOS
 
 ```bash
 brew install rustup-init && rustup-init
+xcode-select --install                        # C/C++ compiler
+brew install cmake
 ```
 
-Or use the same `curl` command as on Linux if you do not use Homebrew.
+Rust can also be installed with the same `curl` command as on Linux if you do not use
+Homebrew.
 
 ## Bootstrapping the SD card for the Raspberry Pi 5
 
@@ -226,15 +252,16 @@ normally need it on the Pi.
 
 * **Send your own data.** The client sends a JSON object with one field. Build whatever
   structure your measurements need in `crates/pq-meter-client/src/main.rs`, and send in a
-  loop instead of once.
+  loop instead of once. Keep the one `scion_http3::Client`: it holds a pool of connections,
+  so every request after the first one reuses the connection that is already up.
 * **Receive your own data.** The server prints the request body as text
   (`crates/pq-meter-server/src/api.rs`). It is a normal [axum](https://docs.rs/axum)
   application, so you can add routes, and let axum parse your JSON into a type by taking
   `axum::Json<YourType>` as the handler argument.
-* **Look at paths.** SCION lets an application see and choose the paths to a destination.
-  The [SDK getting-started guide](https://docs.rs/scion-stack) shows how, and
-  `crates/pq-meter-server/src/network.rs` is where you would add more autonomous systems and
-  links to have more than one path to play with.
+* **Look at paths.** SCION lets an application see and choose the paths to a destination. The
+  [academy](https://learn.anapaya.net/docs/academy/scion-sdk/) explains how paths are built,
+  and `crates/pq-meter-server/src/network.rs` is where you would add more autonomous systems
+  and links to have more than one path to play with.
 
 Two shortcuts in this template are fine for a hackathon but not for a product: the server
 generates a self-signed certificate on every start and the client does not verify it, and

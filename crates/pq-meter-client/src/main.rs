@@ -3,28 +3,28 @@
 //! Sends one message to `pq-meter-server` over SCION and prints the answer. Run it on the
 //! gateway (Raspberry Pi); run `pq-meter-server` on the laptop.
 //!
+//! The work is done by [`scion_http3::Client`], the high-level HTTP/3 client of the SDK. It
+//! keeps a pool of connections, so a program that sends measurements in a loop can reuse one
+//! client and pay for the connection only once.
+//!
 //! The client needs two addresses:
 //!
-//! * `--endhost-api`: the URL of the endhost API of its own AS. This is where the SCION
-//!   stack asks for paths and for the SNAP that carries its packets. The server prints
-//!   this URL when it starts.
+//! * `--endhost-api`: the URL of the endhost API of its own AS. This is where the client asks
+//!   for paths and for the SNAP that carries its packets. The server prints this URL when it
+//!   starts.
 //! * `--server`: the SCION address of the HTTP/3 server, also printed by the server.
 
-use std::sync::Arc;
-
 use anyhow::Context;
-use bytes::Bytes;
 use clap::Parser;
-use http_body_util::BodyExt;
-use scion_quic::{
-    h3::client::Http3Client, quic::config::QuicConfig, socket::GenericScionUdpSocket,
-};
-use scion_stack::stack::ScionStackBuilder;
+use scion_http3::{Client, Config, Request, scion_quic::quic::config::QuicConfig};
 use sciparse::address::ip_socket_addr::ScionSocketIpAddr;
 use url::Url;
 
 /// TLS name the server's certificate is issued for.
 const SERVER_NAME: &str = "pq-meter-server";
+
+/// Largest response body we read. The answer of the server is a few bytes.
+const MAX_BODY_SIZE: usize = 1024;
 
 /// Command line arguments.
 #[derive(Debug, Parser)]
@@ -64,73 +64,43 @@ async fn main() -> anyhow::Result<()> {
     // The SDK uses rustls for its control plane; pick a crypto backend.
     scion_sdk_utils::rustls::select_ring_crypto_provider();
 
-    // A ScionStack is the SCION equivalent of the network stack of an operating system: the
-    // object sockets are opened on. It reaches the SCION network through the SNAP that the
-    // endhost API points it to.
-    let stack = ScionStackBuilder::new()
-        .with_endhost_api(args.endhost_api)
-        .with_auth_token(snap_tokens::v0::dummy_snap_token())
+    // One client per program: it holds the connection pool. Building it does no I/O, the
+    // connection is established with the first request.
+    let client = Client::new(
+        Config::new(args.endhost_api)
+            .with_auth_token(snap_tokens::v0::dummy_snap_token())
+            // The server uses a self-signed certificate, so its identity is not verified.
+            .with_quic_config(QuicConfig::builder().verify_peer(false).build()),
+    );
+
+    let body = serde_json::to_vec(&serde_json::json!({ "message": args.message }))
+        .context("encoding the message")?;
+
+    // The URL holds the server name and the port. `target` gives the SCION address the
+    // packets go to, so the simulated network needs no DNS.
+    let url = format!("https://{SERVER_NAME}:{}{}", args.server.port(), args.path);
+    let request = Request::post(&url)
+        .header("content-type", "application/json")
+        .target(args.server.host())
+        .body(body)
         .build()
-        .await
-        .context("building the SCION stack")?;
-
-    let socket = stack.bind(None).await.context("opening a SCION socket")?;
-    println!("client SCION address: {}", socket.local_addr());
-
-    // HTTP/3 client from the SDK. The SCION address decides where the packets go; the URL
-    // below only carries the HTTP host and path.
-    let client = Http3Client::with_config(
-        args.server,
-        Arc::new(socket) as Arc<dyn GenericScionUdpSocket>,
-        Some(SERVER_NAME.to_string()),
-        // The server uses a self-signed certificate, so its identity is not verified.
-        QuicConfig::builder().verify_peer(false).build(),
-    );
-
-    let body = Bytes::from(
-        serde_json::to_vec(&serde_json::json!({ "message": args.message }))
-            .context("encoding the message")?,
-    );
-
-    let request = http::Request::builder()
-        .method(http::Method::POST)
-        .uri(format!("https://{SERVER_NAME}{}", args.path))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .body(())
         .context("building the request")?;
 
     println!("sending to {}{} ...", args.server, args.path);
 
-    let (response, mut writer) = client
+    let response = client
         .request(request)
         .await
         .context("sending the request")?;
-
-    // HTTP/3 puts no ordering between the request body and the response, so the body is
-    // written from its own task while the response is awaited.
-    let send_body = tokio::spawn(async move {
-        writer.write_chunk(body).await?;
-        writer.finish().await
-    });
-
-    let response = response.await.context("waiting for the response")?;
-    send_body
-        .await
-        .context("body task failed")?
-        .context("sending the request body")?;
-
     let status = response.status();
-    let body = response
-        .into_body()
-        .collect()
+    let (body, _trailers) = response
+        .text(Some(MAX_BODY_SIZE))
         .await
-        .context("reading the response body")?
-        .to_bytes();
+        .context("reading the response")?;
 
-    println!(
-        "server answered {status}: {}",
-        String::from_utf8_lossy(&body)
-    );
+    println!("server answered {status}: {body}");
+
+    client.close().await;
 
     anyhow::ensure!(status.is_success(), "server answered with {status}");
     Ok(())
