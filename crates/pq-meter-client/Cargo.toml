@@ -1,0 +1,19 @@
+[package]
+name = "pq-meter-client"
+description = "Sends meter data to the pq-meter-server over SCION HTTP/3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+scion-http3 = { workspace = true }
+scion-sdk-utils = { workspace = true }
+sciparse = { workspace = true }
+serde_json = { workspace = true }
+snap-tokens = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }

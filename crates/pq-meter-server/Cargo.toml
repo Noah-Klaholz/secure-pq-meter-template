@@ -1,0 +1,25 @@
+[package]
+name = "pq-meter-server"
+description = "Runs a simulated SCION network and an HTTP/3 server that receives meter data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+pocketscion = { workspace = true }
+rcgen = { workspace = true }
+scion-h3-axum = { workspace = true }
+scion-quic = { workspace = true }
+scion-sdk-utils = { workspace = true }
+scion-stack = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
