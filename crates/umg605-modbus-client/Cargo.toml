@@ -1,0 +1,21 @@
+[package]
+name = "umg605-modbus-client"
+description = "Reads measured values from a Janitza UMG 605-PRO over Modbus TCP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tokio-modbus = { workspace = true }
+
+# Only required for the example binary, not the library itself.
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+
+[[bin]]
+name = "pinger"
+path = "bin/pinger.rs"

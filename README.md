@@ -1,13 +1,14 @@
 # Secure power quality metering via SCION — starter template
 
 This repository is the starting point for the *Secure Power Quality Metering via SCION*
-challenge at the [Energy Data Hackdays](https://www.energydatahackdays.ch/). It contains two
-small programs that already talk to each other over a SCION network:
+challenge at the [Energy Data Hackdays](https://www.energydatahackdays.ch/). It contains
+three small programs:
 
 * a **server** that runs on your laptop and receives data,
-* a **client** that runs on the Raspberry Pi 5 gateway and sends data.
+* a **client** that runs on the Raspberry Pi 5 gateway and sends data to it over SCION,
+* a **Modbus client** that reads data from a UMG 605-PRO power quality meter over Modbus TCP.
 
-Get these two running first. Once a message from the Pi shows up on your laptop, the
+Get these three running first. Once a message from the Pi shows up on your laptop, the
 networking part of the challenge is done and you can put your time into the gateway itself:
 reading the meter, deciding what to send, and how often.
 
@@ -24,11 +25,14 @@ crates/
     src/api.rs             The HTTP/3 endpoint that receives the data
   pq-meter-client/         Runs on the gateway
     src/main.rs            Sends one message and prints the answer
+  umg605-modbus-client/    Reads data from a UMG 605-PRO power quality meter over Modbus TCP
+    src/lib.rs             The Modbus TCP client and the registers it reads
+    bin/pinger.rs          Example binary that reads values from the meter
 Cargo.toml                 Workspace, pins the SCION SDK version
 rust-toolchain.toml        Rust version used to build this repository
 ```
 
-Both programs are built on the [SCION endhost SDK](https://github.com/Anapaya/scion-sdk),
+The server and client are built on the [SCION endhost SDK](https://github.com/Anapaya/scion-sdk),
 pinned to one release in the workspace `Cargo.toml`. The
 [SCION SDK academy](https://learn.anapaya.net/docs/academy/scion-sdk/) explains the concepts
 behind it — autonomous systems, addresses, paths and segments — and is the place to read up
@@ -156,6 +160,31 @@ Two more things to check when the ports look fine:
 * The Pi and the laptop have to be on the **same network**, and it must not be a guest WLAN —
   those often block traffic between devices.
 
+## Read from the meter
+
+The third program talks to the meter rather than to SCION. `umg605-modbus-client` is a small
+Modbus TCP client for the UMG 605-PRO, with a `pinger` binary that reads a few values in a
+loop so you can check that the meter answers:
+
+```bash
+cargo run -p umg605-modbus-client --bin pinger -- --ip 192.168.1.50 monitor
+```
+
+```text
+Voltage L1: 230.12 V, Current L1: 1.83 A, Power L1-N: 420.75 W
+```
+
+The meter has to be reachable from the machine you run this on, which on the day means the Pi.
+
+In your own code the entry point is `Umg605ProClient`: `connect_tcp` opens the connection,
+and `voltage_l1`, `current_l1` and `power_l1_n` each read one measured value.  
+
+Which register holds which value is in the [register map of the meter][register-map].
+
+You can look at the example functions provided in the library to see how to read other values.
+
+[register-map]: https://assets.janitza.com/ce18jq9ih0x6/b83ae2356a42a682591109/ef2bc2b24a6b7c77de4dbda20e43cebf/janitza-mal-umg605pro-en.pdf
+
 ## Installing the build tools
 
 You need Rust, cmake and a C/C++ compiler. The last two are needed because the TLS library
@@ -246,10 +275,18 @@ scp target/aarch64-unknown-linux-gnu/release/pq-meter-client <user>@<hostname>.l
 Then run it on the Pi as shown [above](#run-it-between-the-pi-and-the-laptop).
 
 The server can be cross compiled the same way (`-p pq-meter-server`), but you will not
-normally need it on the Pi.
+normally need it on the Pi. The `pinger` does belong there, since the meter is on the network
+of the Pi:
+
+```bash
+cargo cross build --release -p umg605-modbus-client --bin pinger --target aarch64-unknown-linux-gnu
+```
 
 ## Where to continue
 
+* **Read the meter.** `pq-meter-client` already depends on `umg605-modbus-client`, so
+  `use umg605_modbus_client::Umg605ProClient;` in `crates/pq-meter-client/src/main.rs` is
+  enough to read a value and send it on. Check the meter with the `pinger` [first](#read-from-the-meter).
 * **Send your own data.** The client sends a JSON object with one field. Build whatever
   structure your measurements need in `crates/pq-meter-client/src/main.rs`, and send in a
   loop instead of once. Keep the one `scion_http3::Client`: it holds a pool of connections,
