@@ -8,12 +8,17 @@
 //! Run it on the laptop; run `pq-meter-client` on the gateway.
 
 mod api;
+mod decision;
+mod input;
 mod network;
 
-use std::{net::IpAddr, sync::Arc};
+use std::{
+    net::IpAddr,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use pocketscion::util::dev_auth_token;
 use scion_quic::socket::GenericScionUdpSocket;
 use scion_stack::stack::ScionStackBuilder;
@@ -35,6 +40,18 @@ struct Args {
     /// Path the HTTP/3 server accepts POST requests on.
     #[arg(long, default_value = api::DEFAULT_PATH)]
     path: String,
+
+    /// Algorithm used to infer device changes from total-power readings.
+    #[arg(long, value_enum, default_value_t = DecisionMethodArg::Settled)]
+    decision_method: DecisionMethodArg,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DecisionMethodArg {
+    /// Wait for three readings within +/- 3 W before deciding.
+    Settled,
+    /// Decide immediately from each change relative to the previous reading.
+    Immediate,
 }
 
 #[tokio::main]
@@ -70,12 +87,22 @@ async fn main() -> anyhow::Result<()> {
         .context("opening a SCION socket for the server")?;
     let server_address = socket.local_addr();
 
-    // The catalog and decision method are intentionally supplied independently. Edit the
-    // table in `api.rs`, or replace `ClosestPowerMatch` with another `DecisionMethod`.
-    let meter = Arc::new(std::sync::Mutex::new(api::MeterState::new(
-        api::DUMMY_DEVICE_CATALOG.to_vec(),
+    // The table, decision method, and input decoder are supplied independently so each can
+    // be replaced without changing the HTTP server.
+    let meter = Arc::new(Mutex::new(api::MeterState::new(
+        decision::DUMMY_DEVICE_CATALOG.to_vec(),
     )));
-    let decision_method: api::SharedDecisionMethod = Arc::new(api::ClosestPowerMatch::new(40.0));
+    let decision_method: Box<dyn decision::DecisionMethod> = match args.decision_method {
+        DecisionMethodArg::Settled => Box::new(decision::SettledPowerMatch::new(
+            5.0, // Minimum change that can trigger a device-state update.
+            3.0, // Consecutive readings must remain within +/- 3 W.
+            3,   // At one reading/second, this waits roughly two seconds after the change.
+            5.0, // Maximum difference between the settled delta and table value.
+        )),
+        DecisionMethodArg::Immediate => Box::new(decision::ClosestPowerMatch::new(5.0)),
+    };
+    let decision_method: api::SharedDecisionMethod = Arc::new(Mutex::new(decision_method));
+    let reading_decoder: input::SharedReadingDecoder = Arc::new(input::DummyJsonDecoder);
 
     println!("SCION network is up");
     println!("  gateway endhost API: {}", network.gateway_endhost_api);
@@ -92,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         &args.path,
         meter,
         decision_method,
+        reading_decoder,
     )
     .await
 }
