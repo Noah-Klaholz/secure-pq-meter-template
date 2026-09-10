@@ -22,7 +22,7 @@ use clap::Parser;
 use scion_http3::{Client, Config, Request, scion_quic::quic::config::QuicConfig};
 use sciparse::address::ip_socket_addr::ScionSocketIpAddr;
 use tokio_modbus::Slave;
-use umg605_modbus_client::{DEFAULT_MODBUS_PORT, Umg605ProClient};
+use umg605_modbus_client::{DEFAULT_MODBUS_PORT, Snapshot, Umg605ProClient};
 use url::Url;
 
 /// SCION AS of the server.
@@ -184,17 +184,18 @@ async fn monitor(
         interval.tick().await;
         let start = Instant::now();
 
-        let systime = meter.systime().await?;
-        let frequency = meter.frequency().await?;
-
-        let voltage_l1 = meter.voltage_l1().await?;
-        let current_l1 = meter.current_l1().await?;
-        let real_power_l1 = meter.real_power_l1().await?;
-        let apparent_power_l1 = meter.apparent_power_l1().await?;
-        let reactive_power_l1 = meter.reactive_power_l1().await?;
-        let cos_phi_l1 = meter.cos_phi_l1().await?;
-        let real_energy_consumed_l1 = meter.real_energy_consumed_l1().await?;
-        let thd_current_l1 = meter.thd_current_l1().await?;
+        let Snapshot {
+            systime,
+            frequency,
+            voltage_l1,
+            current_l1,
+            real_power_l1,
+            apparent_power_l1,
+            reactive_power_l1,
+            cos_phi_l1,
+            real_energy_consumed_l1,
+            thd_current_l1,
+        } = meter.snapshot().await?;
 
         let read_elapsed = start.elapsed();
 

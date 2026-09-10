@@ -111,23 +111,133 @@ impl Umg605ProClient {
         };
         Ok((((hi as u32) << 16) | (lo as u32)) as i32)
     }
+
+    /// Reads `count` consecutive holding registers as one Modbus transaction.
+    ///
+    /// Values are then decoded from the returned block by address. Reading a range in one
+    /// go costs one round trip instead of one per value, which is what keeps a fast poll
+    /// interval affordable.
+    pub async fn read_block(&mut self, start: u16, count: u16) -> Result<RegisterBlock, ReadError> {
+        let registers = self.read_holding_registers(start, count).await?;
+        if registers.len() != usize::from(count) {
+            return Err(ReadError::DecodeError(Cow::Owned(format!(
+                "expected {count} registers at {start}, got {}",
+                registers.len()
+            ))));
+        }
+        Ok(RegisterBlock { start, registers })
+    }
 }
 
+/// A range of holding registers fetched in a single read.
+pub struct RegisterBlock {
+    start: u16,
+    registers: Vec<u16>,
+}
 
+impl RegisterBlock {
+    /// The two registers holding the 32-bit value at `addr`.
+    fn pair(&self, addr: u16) -> Result<(u16, u16), ReadError> {
+        let offset = addr
+            .checked_sub(self.start)
+            .map(usize::from)
+            .filter(|offset| offset + 1 < self.registers.len())
+            .ok_or_else(|| {
+                ReadError::DecodeError(Cow::Owned(format!(
+                    "address {addr} is outside the block at {} of {} registers",
+                    self.start,
+                    self.registers.len()
+                )))
+            })?;
+        Ok((self.registers[offset], self.registers[offset + 1]))
+    }
+
+    /// Decodes the float32 value at `addr`.
+    pub fn f32_at(&self, addr: u16) -> Result<f32, ReadError> {
+        let (hi, lo) = self.pair(addr)?;
+        Ok(f32::from_bits(((hi as u32) << 16) | (lo as u32)))
+    }
+
+    /// Decodes the int32 value at `addr`.
+    pub fn i32_at(&self, addr: u16) -> Result<i32, ReadError> {
+        let (hi, lo) = self.pair(addr)?;
+        Ok((((hi as u32) << 16) | (lo as u32)) as i32)
+    }
+}
+
+/// Addresses of the registers read together by [`Umg605ProClient::snapshot`].
+pub mod reg {
+    pub const SYSTIME: u16 = 4;
+    pub const VOLTAGE_L1: u16 = 19000;
+    pub const CURRENT_L1: u16 = 19012;
+    pub const REAL_POWER_L1: u16 = 19020;
+    pub const APPARENT_POWER_L1: u16 = 19028;
+    pub const REACTIVE_POWER_L1: u16 = 19036;
+    pub const COS_PHI_L1: u16 = 19044;
+    pub const FREQUENCY: u16 = 19050;
+    pub const REAL_ENERGY_CONSUMED_L1: u16 = 19062;
+    pub const THD_CURRENT_L1: u16 = 19116;
+
+    /// Registers spanning [`VOLTAGE_L1`] up to and including [`REAL_ENERGY_CONSUMED_L1`].
+    /// Modbus allows up to 125 per read, so this fits in one transaction.
+    pub const MEASUREMENT_BLOCK_LEN: u16 = REAL_ENERGY_CONSUMED_L1 + 2 - VOLTAGE_L1;
+}
+
+/// One consistent set of readings taken from the meter.
+#[derive(Clone, Copy, Debug)]
+pub struct Snapshot {
+    pub systime: i32,
+    pub frequency: f32,
+    pub voltage_l1: f32,
+    pub current_l1: f32,
+    pub real_power_l1: f32,
+    pub apparent_power_l1: f32,
+    pub reactive_power_l1: f32,
+    pub cos_phi_l1: f32,
+    pub real_energy_consumed_l1: f32,
+    pub thd_current_l1: f32,
+}
+
+impl Umg605ProClient {
+    /// Reads every value of a [`Snapshot`] in three Modbus transactions.
+    ///
+    /// The measured values sit in one contiguous range, so they come back in a single
+    /// read; the clock and the THD register live elsewhere and cost one read each.
+    pub async fn snapshot(&mut self) -> Result<Snapshot, ReadError> {
+        let clock = self.read_block(reg::SYSTIME, 2).await?;
+        let measurements = self
+            .read_block(reg::VOLTAGE_L1, reg::MEASUREMENT_BLOCK_LEN)
+            .await?;
+        let thd = self.read_block(reg::THD_CURRENT_L1, 2).await?;
+
+        Ok(Snapshot {
+            systime: clock.i32_at(reg::SYSTIME)?,
+            frequency: measurements.f32_at(reg::FREQUENCY)?,
+            voltage_l1: measurements.f32_at(reg::VOLTAGE_L1)?,
+            current_l1: measurements.f32_at(reg::CURRENT_L1)?,
+            real_power_l1: measurements.f32_at(reg::REAL_POWER_L1)?,
+            apparent_power_l1: measurements.f32_at(reg::APPARENT_POWER_L1)?,
+            reactive_power_l1: measurements.f32_at(reg::REACTIVE_POWER_L1)?,
+            cos_phi_l1: measurements.f32_at(reg::COS_PHI_L1)?,
+            real_energy_consumed_l1: measurements.f32_at(reg::REAL_ENERGY_CONSUMED_L1)?,
+            thd_current_l1: thd.f32_at(reg::THD_CURRENT_L1)?,
+        })
+    }
+}
 
 // Register reading functions for the Umg605Pro device.
 impl Umg605ProClient {
 
     pub async fn voltage_l1(&mut self) -> Result<f32, ReadError> {
-        self.read_f32(19000).await
+        self.read_f32(reg::VOLTAGE_L1).await
     }
 
     pub async fn current_l1(&mut self) -> Result<f32, ReadError> {
-        self.read_f32(19012).await
+        self.read_f32(reg::CURRENT_L1).await
     }
 
     pub async fn real_power_l1(&mut self) -> Result<f32, ReadError> {
-        self.read_f32(19020).await
+        self.read_f32(reg::REAL_POWER_L1).await
     }
 
     /// Alias for real_power_l1
@@ -136,30 +246,30 @@ impl Umg605ProClient {
     }
 
     pub async fn apparent_power_l1(&mut self) -> Result<f32, ReadError> {
-        self.read_f32(19028).await
+        self.read_f32(reg::APPARENT_POWER_L1).await
     }
 
     pub async fn reactive_power_l1(&mut self) -> Result<f32, ReadError> {
-        self.read_f32(19036).await
+        self.read_f32(reg::REACTIVE_POWER_L1).await
     }
 
     pub async fn cos_phi_l1(&mut self) -> Result<f32, ReadError> {
-        self.read_f32(19044).await
+        self.read_f32(reg::COS_PHI_L1).await
     }
 
     pub async fn frequency(&mut self) -> Result<f32, ReadError> {
-        self.read_f32(19050).await
+        self.read_f32(reg::FREQUENCY).await
     }
 
     pub async fn real_energy_consumed_l1(&mut self) -> Result<f32, ReadError> {
-        self.read_f32(19062).await
+        self.read_f32(reg::REAL_ENERGY_CONSUMED_L1).await
     }
 
     pub async fn thd_current_l1(&mut self) -> Result<f32, ReadError> {
-        self.read_f32(19116).await
+        self.read_f32(reg::THD_CURRENT_L1).await
     }
 
     pub async fn systime(&mut self) -> Result<i32, ReadError> {
-        self.read_i32(4).await
+        self.read_i32(reg::SYSTIME).await
     }
 }
