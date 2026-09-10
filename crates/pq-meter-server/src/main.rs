@@ -106,6 +106,9 @@ async fn main() -> anyhow::Result<()> {
     // address, so we can only print it once the socket exists.
     let stack = ScionStackBuilder::new()
         .with_endhost_api(network.server_endhost_api.clone())
+        // TODO(security): PocketSCION's development token. It exists so the simulator can
+        // be driven without an AA; a receiver on a real SCION network needs a credential
+        // issued to it.
         .with_auth_token(dev_auth_token())
         .build()
         .await
