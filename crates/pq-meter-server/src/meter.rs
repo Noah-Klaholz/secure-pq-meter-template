@@ -50,6 +50,10 @@ impl MeterState {
         self.latest_reading.map(|reading| reading.total_power)
     }
 
+    pub fn recent_history(&self, count: usize) -> &[crate::history::HistoryEntry<MeterReading>] {
+        self.history.recent(count)
+    }
+
     pub fn snapshot(&self) -> MeterSnapshot {
         MeterSnapshot {
             catalog: self.catalog.clone(),
