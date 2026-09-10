@@ -1,4 +1,4 @@
-import { fetchState } from './api.js';
+import { fetchHistory, fetchState } from './api.js';
 import { createOverview } from './overview.js';
 
 // The shell owns polling/lifecycle; view modules only render a supplied read model.
@@ -10,12 +10,25 @@ let error = null;
 let pending = false;
 let timer;
 
+// The series is larger than the snapshot and moves more slowly, so it is fetched less
+// often. A failure to load it must not cost the live view.
+const HISTORY_EVERY = 2;
+let sinceHistory = HISTORY_EVERY;
+
 async function update() {
   if (pending) return;
   clearTimeout(timer);
   pending = true;
   refresh.disabled = true;
   try {
+    if (++sinceHistory >= HISTORY_EVERY) {
+      sinceHistory = 0;
+      try {
+        overview.history(await fetchHistory());
+      } catch {
+        // Keep the last series rather than blanking the charts.
+      }
+    }
     snapshot = await fetchState();
     receivedAt = performance.now();
     error = null;

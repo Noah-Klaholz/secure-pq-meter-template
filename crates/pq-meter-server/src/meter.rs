@@ -1,11 +1,21 @@
 //! Transport-independent, in-memory state. Only accepted readings update this store.
 
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
 use crate::decision::{DecisionMethod, Device, DeviceChange, contains_device};
+use crate::history::{History, HistoryEntry};
 use crate::input::MeterReading;
+use crate::transport::GatewayTransport;
+
+/// How much of the recent past the dashboard charts can draw.
+pub const HISTORY_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Samples kept for that window. The gateway reads every 200 ms, so this holds the full
+/// window even if every single reading crossed the reporting threshold.
+const HISTORY_CAPACITY: usize = 600;
 
 pub type SharedMeterState = Arc<Mutex<MeterState>>;
 
@@ -16,6 +26,10 @@ pub struct MeterState {
     readings_received: u64,
     last_received_at: Option<DateTime<Utc>>,
     last_change: Option<(DeviceChange, DateTime<Utc>)>,
+    /// Accepted readings of the last [`HISTORY_WINDOW`], oldest first.
+    history: History<MeterReading>,
+    /// What the gateway last reported about the link it delivers over.
+    transport: GatewayTransport,
 }
 
 /// An owned, consistent copy lets readers release the lock before formatting a response.
@@ -27,6 +41,7 @@ pub struct MeterSnapshot {
     pub readings_received: u64,
     pub last_received_at: Option<DateTime<Utc>>,
     pub last_change: Option<(DeviceChange, DateTime<Utc>)>,
+    pub transport: GatewayTransport,
 }
 
 impl MeterState {
@@ -38,7 +53,24 @@ impl MeterState {
             readings_received: 0,
             last_received_at: None,
             last_change: None,
+            history: History::bounded(HISTORY_CAPACITY),
+            transport: GatewayTransport::default(),
         }
+    }
+
+    /// Records what the gateway reported about its link. Only a report that carries at
+    /// least one field replaces the previous one, so a sender that omits the headers does
+    /// not blank out what an earlier batch established.
+    pub fn record_transport(&mut self, reported: GatewayTransport) {
+        if !reported.is_empty() {
+            self.transport = reported;
+        }
+    }
+
+    /// The readings of the last [`HISTORY_WINDOW`], for the dashboard charts.
+    pub fn recent_history(&self, now: SystemTime) -> &[HistoryEntry<MeterReading>] {
+        self.history
+            .since(now.checked_sub(HISTORY_WINDOW).unwrap_or(now))
     }
 
     pub fn latest_power(&self) -> Option<f32> {
@@ -54,6 +86,7 @@ impl MeterState {
             readings_received: self.readings_received,
             last_received_at: self.last_received_at,
             last_change: self.last_change,
+            transport: self.transport.clone(),
         }
     }
 
@@ -84,6 +117,7 @@ impl MeterState {
             self.last_change = Some((change, now));
         }
         self.latest_reading = Some(reading);
+        self.history.push(reading, SystemTime::now());
         self.readings_received += 1;
         self.last_received_at = Some(now);
         change

@@ -15,6 +15,8 @@ pub mod history;
 mod input;
 mod meter;
 mod network;
+mod quality;
+mod transport;
 
 #[cfg(test)]
 mod e2e_pipeline_test;

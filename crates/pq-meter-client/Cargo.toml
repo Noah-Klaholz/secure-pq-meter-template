@@ -11,6 +11,7 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 scion-http3 = { workspace = true }
 scion-sdk-utils = { workspace = true }
+scion-stack = { workspace = true }
 sciparse = { workspace = true }
 serde_json = { workspace = true }
 snap-tokens = { workspace = true }

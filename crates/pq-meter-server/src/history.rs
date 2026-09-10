@@ -7,6 +7,8 @@ pub struct HistoryEntry<T> {
 
 pub struct History<T> {
     entries: Vec<HistoryEntry<T>>,
+    /// Oldest entries are dropped past this many. `None` keeps everything.
+    capacity: Option<usize>,
 }
 
 impl<T> Default for History<T> {
@@ -16,16 +18,46 @@ impl<T> Default for History<T> {
 }
 
 impl<T> History<T> {
-    /// Creates an empty history.
+    /// Creates an empty, unbounded history.
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            capacity: None,
         }
     }
 
-    /// Adds a new history entry with the given timestamp.
+    /// Creates a history that keeps only the most recent `capacity` entries.
+    ///
+    /// A live receiver runs for as long as the demo does, so the in-memory series that
+    /// feeds the dashboard charts has to have a ceiling. Dropping the oldest entry is the
+    /// right trade here: the charts only ever look at a trailing window.
+    pub fn bounded(capacity: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            capacity: Some(capacity.max(1)),
+        }
+    }
+
+    /// Adds a new history entry with the given timestamp, evicting the oldest entries
+    /// once the capacity is reached.
     pub fn push(&mut self, data: T, timestamp: SystemTime) {
         self.entries.push(HistoryEntry { timestamp, data });
+        if let Some(capacity) = self.capacity
+            && self.entries.len() > capacity
+        {
+            let excess = self.entries.len() - capacity;
+            self.entries.drain(..excess);
+        }
+    }
+
+    /// Returns the entries recorded at or after `cutoff`, oldest first.
+    ///
+    /// Entries are pushed in arrival order, so the wanted window is a suffix of the list.
+    pub fn since(&self, cutoff: SystemTime) -> &[HistoryEntry<T>] {
+        let start = self
+            .entries
+            .partition_point(|entry| entry.timestamp < cutoff);
+        &self.entries[start..]
     }
 
     /// Returns the most recently added entry, if one exists.
@@ -180,6 +212,49 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].data.total_power, 200.0);
         assert_eq!(recent[1].data.total_power, 300.0);
+    }
+
+    #[test]
+    fn bounded_history_drops_the_oldest_entries() {
+        let mut history = History::bounded(2);
+
+        for (index, power) in [100.0, 200.0, 300.0].into_iter().enumerate() {
+            history.push(
+                measurement(power, index as i32),
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(index as u64),
+            );
+        }
+
+        // The window holds the newest two; the first reading is gone rather than the
+        // history growing for as long as the receiver runs.
+        assert_eq!(history.all().len(), 2);
+        assert_eq!(history.all()[0].data.total_power, 200.0);
+        assert_eq!(history.all()[1].data.total_power, 300.0);
+        assert_eq!(history.latest().unwrap().data.total_power, 300.0);
+    }
+
+    #[test]
+    fn since_returns_only_the_entries_inside_the_window() {
+        let mut history = History::bounded(10);
+        for index in 0..5u64 {
+            history.push(
+                measurement(100.0 + index as f32, index as i32),
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(index),
+            );
+        }
+
+        let window = history.since(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3));
+        assert_eq!(window.len(), 2);
+        assert_eq!(window[0].data.total_power, 103.0);
+        assert_eq!(window[1].data.total_power, 104.0);
+
+        // A cutoff before everything keeps everything, one after it keeps nothing.
+        assert_eq!(history.since(SystemTime::UNIX_EPOCH).len(), 5);
+        assert!(
+            history
+                .since(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(99))
+                .is_empty()
+        );
     }
 
     #[test]

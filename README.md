@@ -251,28 +251,85 @@ cargo run -p pq-meter-server -- --no-dashboard
 The dashboard always binds to `127.0.0.1`, independently of `--bind-ip`, so making SCION
 reachable from the gateway does not expose the dashboard to the network. HTML, CSS, and
 JavaScript are embedded in the Rust binary; there is no frontend build, CDN, or extra
-process to start. Recompile the server after editing an asset.
+process to start. Recompile the server after editing an asset. The charts are inline SVG
+drawn by `assets/charts.js`: the content security policy allows scripts from this origin
+only, so there is no charting library to load.
 
 The overview refreshes once per second and shows:
 
-- The latest accepted total-power reading, in watts.
-- Inferred active devices and their summed nominal catalog power.
-- All catalog entries, the latest device addition/removal, and the selected decision method.
-- Accepted reading count and the server receipt time of the last reading.
+- **Grid frequency**, against the EN 50160 band it is judged in.
+- **Net real power**, signed, with an import/export badge. This is the meter's own
+  three-phase sum, so an exporting site reads negative.
+- **Supply status**, summarising the power-quality events below.
+- **SCION link** state, judged from when a reading last arrived.
+- **Per phase**: voltage, current, real power, cos φ, and both harmonic distortion
+  figures, with any value outside its limit coloured.
+- **Rolling 60-second charts** of frequency, the three phase voltages, and real power,
+  with the allowed band shaded behind the trace.
+- **Power quality events**: every measurement outside its limit, in words.
+- **SCION transport**: the path in use, last acknowledgement latency, queued readings,
+  and path failover count.
+- Device inference, kept as a secondary panel.
 
-Before a reading arrives, measurements show as unavailable. After ten seconds without an
-accepted reading, the view marks the retained state as stale. If the dashboard API becomes
-unreachable, it preserves the last view, marks it disconnected, and retries automatically.
-Polling pauses in background tabs and resumes when they become visible.
+### Power-quality limits
 
-Device activity is inferred from **changes** in total power. The first reading establishes
-a baseline; a device already on at startup is not automatically identified. “Not detected”
-is therefore not a confirmed off state, and nominal catalog power is not an individual
-measurement. The receiver validates and retains the latest gateway measurement, including
-voltage, frequency, and other context, in the read API's `latest_reading` field. These extra
-fields are not displayed by the overview UI.
+The limits live in `quality.rs` rather than in the dashboard's JavaScript, so there is one
+definition, covered by tests, that the UI only colours in. They follow EN 50160: voltage
+within 10% of 230 V, frequency within 49.5–50.5 Hz, and voltage distortion at most 8%.
 
-### Dashboard architecture and future history
+Two judgements are deliberately narrower than "compare against the limit":
+
+- A phase with **nothing wired to it** reads 0 V. That is an absence of supply on an unused
+  terminal, not an undervoltage event, so a phase drawing no current is not judged against
+  the voltage band. Otherwise a bench meter connected on L1 would report two permanent
+  faults that bury the real measurement.
+- **Current distortion** is only judged above 1 A. THD_I is a ratio against a fundamental
+  that approaches zero when a phase is idle, so the meter on the bench reports over 100%
+  for the few hundred milliamps it draws at rest. It is shown as context at any current and
+  raised as a warning, never a violation, above that threshold — EN 50160 sets no
+  current-distortion limit.
+
+A value the meter reported as unavailable is never a violation: an unknown value is not a
+measured excursion.
+
+### Transport telemetry
+
+The receiver cannot see most of the link for itself. Which path the packets took, how many
+readings are waiting on the gateway, and how often it has failed over are facts about the
+*sending* end. The gateway reports them as headers on each batch, which leaves the
+measurement body exactly as documented above:
+
+| Header | Meaning |
+| --- | --- |
+| `x-pq-scion-path` | The SCION path in use, e.g. `1-ff00:0:132 1>3 2-ff00:0:212` |
+| `x-pq-queued-readings` | Readings buffered on the gateway and not yet acknowledged |
+| `x-pq-ack-latency-ms` | Round trip of the gateway's *previous* batch |
+| `x-pq-failover-count` | How often the gateway has changed path since it started |
+
+Every header is optional and independently parsed. A malformed value is dropped rather than
+failing the batch — measurements must not be rejected over their metadata — and a gateway
+that sends none of them leaves the panel empty rather than showing zeros that look measured.
+The path string is bounded and stripped of control characters before being stored, and the
+dashboard renders it as text: it arrives from the network.
+
+The **link state** is the one part the receiver judges for itself, from when a batch last
+arrived. A gateway that has stopped sending cannot claim to be connected.
+
+### Reading history
+
+`GET /api/v1/history` serves the accepted readings of the last 60 seconds, oldest first, as
+the narrow per-sample shape the charts plot. It is kept apart from `GET /api/v1/state`
+because the live view is polled every second and has to stay small while the series grows
+with the window; the dashboard fetches it half as often. Retention is bounded in memory
+(`History::bounded`), so a receiver left running does not grow without limit, and a restart
+resets it.
+
+Because the gateway only sends readings that cross its noise threshold, an idle
+installation would otherwise produce an empty chart and a link that reports itself stale
+while it is perfectly healthy. The gateway therefore also sends a reading when nothing has
+changed for `--heartbeat-ms` (2 s by default; `0` restores pure change-triggered sending).
+
+### Dashboard architecture
 
 `meter.rs` owns the current application state. The SCION ingestion handler updates it only
 after a reading has been decoded and accepted. It records receipt time, reading count, and
@@ -283,22 +340,28 @@ interface. `LiveMeterSource` takes a consistent copy of meter state under a shor
 then builds the response after releasing it. The dashboard never calls the decision engine
 or mutates the meter. Alternative sources can implement the same interface.
 
-`dashboard/mod.rs` serves the embedded assets and read-only `GET /api/v1/state` endpoint.
-The response includes `schema_version`, server timestamps, the stale threshold, power,
-reading count, device states, the last change, and the latest full measurement. Responses
-disable caching. No reading is represented as JSON `null`, not zero. An unavailable store
-returns a JSON error with HTTP 503; mutation requests are not supported.
+`quality.rs` holds the limits and decides which measurements breach them. `transport.rs`
+parses what the gateway reports about the link. Neither knows about HTTP or the dashboard.
+
+`dashboard/mod.rs` serves the embedded assets and the two read-only endpoints,
+`GET /api/v1/state` and `GET /api/v1/history`. The state response includes
+`schema_version`, server timestamps, the stale threshold, the power-quality block and the
+limits it was judged against, the transport, reading count, device states, the last change,
+and the latest full measurement. Responses disable caching. No reading is represented as
+JSON `null`, not zero. An unavailable store returns a JSON error with HTTP 503; mutation
+requests are not supported.
 
 The frontend separates HTTP requests (`assets/api.js`), polling and lifecycle
-(`assets/app.js`), and rendering (`assets/overview.js`). Add future views alongside the
-overview, with their own API functions and navigation entries.
+(`assets/app.js`), rendering (`assets/overview.js`), and chart geometry
+(`assets/charts.js`). Add future views alongside the overview, with their own API functions
+and navigation entries.
 
-There is **no historical storage yet**: only one current state and the last device change
-are retained, and a server restart resets them. To add history, record timestamped accepted
-readings and device changes at the ingestion boundary, use bounded retention or persistent
-storage, and expose a separate time-range/paginated endpoint (for example,
-`GET /api/v1/history`). Keep historical queries separate from the lightweight live snapshot;
-do not grow the shared state or live response into an unbounded event list.
+History is **in memory and bounded**: the last 60 seconds of accepted readings, capped by
+`History::bounded`, reset by a restart. Device changes are still only kept as the single
+most recent one. To go further, persist timestamped readings and changes at the ingestion
+boundary and extend `/api/v1/history` with a time range and paging. Keep historical queries
+separate from the lightweight live snapshot; do not grow the live response into an
+unbounded event list.
 
 Validation for this module:
 

@@ -3,7 +3,13 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use axum::{Router, body::Bytes, extract::State, http::StatusCode, routing::post};
+use axum::{
+    Router,
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::post,
+};
 use scion_h3_axum::ScionH3AxumServer;
 use scion_quic::{quic::config::QuicConfig, reexport::squiche, socket::GenericScionUdpSocket};
 
@@ -11,6 +17,7 @@ use crate::{
     decision::{DecisionMethod, DeviceChange},
     input::SharedReadingDecoder,
     meter::SharedMeterState,
+    transport::GatewayTransport,
 };
 
 /// Path the server accepts POST requests on.
@@ -56,7 +63,14 @@ pub(crate) fn router(path: &str, state: AppState) -> Router {
 
 /// Validates the whole request before applying each reading in order. Holding both
 /// locks for the batch prevents other requests from interleaving its measurements.
-async fn receive(State(state): State<AppState>, body: Bytes) -> (StatusCode, String) {
+async fn receive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, String) {
+    // Read before validating the body: the gateway's own view of the link is worth having
+    // even for a batch that turns out to be malformed.
+    let reported_transport = GatewayTransport::from_headers(&headers);
     let readings = match state.reading_decoder.decode_readings(&body) {
         Ok(readings) => readings,
         Err(message) => return (StatusCode::BAD_REQUEST, format!("{message}\n")),
@@ -80,6 +94,8 @@ async fn receive(State(state): State<AppState>, body: Bytes) -> (StatusCode, Str
             );
         }
     };
+
+    meter.record_transport(reported_transport);
 
     let count = readings.len();
     let mut additions = 0;
@@ -403,7 +419,9 @@ mod tests {
         };
         for body in [r#"{"total_power":100}"#, r#"{"total_power":123}"#] {
             assert_eq!(
-                receive(State(state.clone()), Bytes::from(body)).await.0,
+                receive(State(state.clone()), HeaderMap::new(), Bytes::from(body))
+                    .await
+                    .0,
                 StatusCode::OK
             );
         }
@@ -413,6 +431,7 @@ mod tests {
         assert_eq!(
             receive(
                 State(state),
+                HeaderMap::new(),
                 Bytes::from_static(br#"{"total_power":1e100}"#)
             )
             .await
@@ -457,6 +476,7 @@ mod tests {
         // First reading: baseline
         let (status, resp) = receive(
             State(state.clone()),
+            HeaderMap::new(),
             Bytes::from(r#"{"total_power":100.0}"#),
         )
         .await;
@@ -466,6 +486,7 @@ mod tests {
         // Second reading: unchanged power -> no device state change
         let (status, resp) = receive(
             State(state.clone()),
+            HeaderMap::new(),
             Bytes::from(r#"{"total_power":100.0}"#),
         )
         .await;
@@ -475,6 +496,7 @@ mod tests {
         // Third reading: add 23 W device
         let (status, resp) = receive(
             State(state.clone()),
+            HeaderMap::new(),
             Bytes::from(r#"{"total_power":123.0}"#),
         )
         .await;
@@ -484,6 +506,7 @@ mod tests {
         // Fourth reading: remove 23 W device
         let (status, resp) = receive(
             State(state.clone()),
+            HeaderMap::new(),
             Bytes::from(r#"{"total_power":100.0}"#),
         )
         .await;
@@ -491,7 +514,12 @@ mod tests {
         assert!(resp.starts_with("removed Baseline"));
 
         // Invalid reading
-        let (status, resp) = receive(State(state), Bytes::from(r#"{"message":"invalid"}"#)).await;
+        let (status, resp) = receive(
+            State(state),
+            HeaderMap::new(),
+            Bytes::from(r#"{"message":"invalid"}"#),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(resp.contains("message must contain a power value"));
     }
