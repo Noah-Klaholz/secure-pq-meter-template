@@ -206,6 +206,9 @@ total from the phases.
 For compatibility, every field except `total_power` may be omitted. When supplied,
 `systime` must be a signed 32-bit integer, matching the client's raw meter register; `l1`,
 `l2`, `l3` must each contain all nine numeric fields shown above, and `totals` all three.
+The optional boolean `heartbeat` marks a keepalive reading, which is recorded and plotted
+but left out of device inference (see [Reading history](#reading-history)); omitted means
+a settled change.
 Unknown fields are ignored. Legacy aliases `power`, `power_watts`, and `power_l1_n`, and the
 legacy object `{"message":"100"}`, remain supported.
 
@@ -328,6 +331,15 @@ Because the gateway only sends readings that cross its noise threshold, an idle
 installation would otherwise produce an empty chart and a link that reports itself stale
 while it is perfectly healthy. The gateway therefore also sends a reading when nothing has
 changed for `--heartbeat-ms` (2 s by default; `0` restores pure change-triggered sending).
+
+Such a reading carries `"heartbeat": true`, and **device inference skips it**. The gateway
+waits for a level to settle before calling it a change, so a reading it sends in the
+meantime can sit anywhere between the old level and the new one. That value is a valid
+measurement — it is plotted and judged against the limits like any other — but it is not
+evidence of a device. Matching it would name the wrong device *and* leave the real change
+to be measured from the intermediate value, so the settled change that follows would be
+mis-matched too. A reading without the field is a settled change, which is what older
+gateways send.
 
 ### Dashboard architecture
 

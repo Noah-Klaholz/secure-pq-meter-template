@@ -238,6 +238,7 @@ mod tests {
                 apparent_power_va: l1.apparent_power_va,
                 reactive_power_var: Some(0.0),
             }),
+            heartbeat: false,
         }
     }
 

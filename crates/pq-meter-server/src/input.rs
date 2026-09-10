@@ -59,6 +59,19 @@ pub struct MeterReading {
         skip_serializing_if = "Option::is_none"
     )]
     pub totals: Option<TotalsReading>,
+    /// True when the gateway sent this only to keep the trend and the link alive, having
+    /// decided nothing changed.
+    ///
+    /// The gateway waits for a level to settle before calling it a change, so a reading it
+    /// sends in the meantime can sit anywhere on the way between two levels. Such a value
+    /// is a valid measurement — it is plotted and judged against the limits like any other
+    /// — but it is not evidence of a device, and device inference has to leave it alone.
+    #[serde(default, skip_serializing_if = "is_not_heartbeat")]
+    pub heartbeat: bool,
+}
+
+fn is_not_heartbeat(heartbeat: &bool) -> bool {
+    !*heartbeat
 }
 
 /// One phase of the client's three-phase block.
@@ -159,6 +172,7 @@ impl From<f32> for MeterReading {
             l2: None,
             l3: None,
             totals: None,
+            heartbeat: false,
         }
     }
 }
@@ -346,6 +360,36 @@ pub(crate) mod tests {
         assert_eq!(reading.l3.unwrap().voltage_v, Some(0.0));
         assert_eq!(reading.totals.unwrap().real_power_w, Some(100.0));
         assert_eq!(reading.totals.unwrap().reactive_power_var, Some(-10.0));
+    }
+
+    #[test]
+    fn a_reading_is_a_settled_change_unless_it_says_otherwise() {
+        // Older gateways do not send the field at all, and their readings are changes.
+        let decoded = JsonReadingDecoder
+            .decode_readings(br#"{"total_power":100.0}"#)
+            .unwrap();
+        assert!(!decoded[0].heartbeat);
+        // Absent means the same as false, so it is not serialized back.
+        assert_eq!(
+            serde_json::to_value(decoded[0]).unwrap(),
+            serde_json::json!({"total_power": 100.0})
+        );
+
+        let decoded = JsonReadingDecoder
+            .decode_readings(br#"{"total_power":100.0,"heartbeat":true}"#)
+            .unwrap();
+        assert!(decoded[0].heartbeat);
+        assert_eq!(
+            serde_json::to_value(decoded[0]).unwrap()["heartbeat"],
+            serde_json::json!(true)
+        );
+
+        // It is a flag, not a measurement: anything else is a malformed reading.
+        assert!(
+            JsonReadingDecoder
+                .decode_readings(br#"{"total_power":100.0,"heartbeat":"yes"}"#)
+                .is_err()
+        );
     }
 
     #[test]

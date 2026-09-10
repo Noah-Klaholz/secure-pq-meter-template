@@ -811,6 +811,7 @@ mod tests {
                 apparent_power_va: Some(apparent),
                 reactive_power_var: Some(reactive),
             }),
+            heartbeat: false,
         }
     }
 
@@ -979,11 +980,9 @@ mod tests {
 
         // 80W Device + 2 Pis turned on: 108.44W, -49.53 var, 122.83% THD
         let reading_80w = make_reading(108.44, -49.53, 122.83);
-        let change = method.decide_reading(Some(&baseline), &reading_80w, DUMMY_DEVICE_CATALOG, &[]);
-        assert_eq!(
-            change,
-            DeviceChange::Added(DUMMY_DEVICE_CATALOG[5])
-        );
+        let change =
+            method.decide_reading(Some(&baseline), &reading_80w, DUMMY_DEVICE_CATALOG, &[]);
+        assert_eq!(change, DeviceChange::Added(DUMMY_DEVICE_CATALOG[5]));
 
         // 80W Device turned off: back to baseline ~25.0W
         let back_to_base = make_reading(25.0, -36.0, 124.5);
@@ -994,10 +993,6 @@ mod tests {
             DUMMY_DEVICE_CATALOG,
             &active,
         );
-        assert_eq!(
-            change_off,
-            DeviceChange::Removed(DUMMY_DEVICE_CATALOG[5])
-        );
+        assert_eq!(change_off, DeviceChange::Removed(DUMMY_DEVICE_CATALOG[5]));
     }
 }
-

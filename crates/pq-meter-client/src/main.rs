@@ -344,7 +344,11 @@ fn phase_json(snapshot: &Snapshot, phase: usize) -> serde_json::Value {
 }
 
 /// One complete three-phase measurement, as sent to the server.
-fn measurement_json(snapshot: &Snapshot, total_power: f32) -> serde_json::Value {
+///
+/// `heartbeat` marks a reading sent only to keep the trend and the link alive. The receiver
+/// keeps it as a measurement but leaves it out of device inference: while a level is still
+/// settling this value can sit anywhere between the old level and the new one.
+fn measurement_json(snapshot: &Snapshot, total_power: f32, heartbeat: bool) -> serde_json::Value {
     serde_json::json!({
         // Device detection uses total_power; the server also validates and retains the
         // timestamp, the frequency, and the per-phase context.
@@ -359,7 +363,8 @@ fn measurement_json(snapshot: &Snapshot, total_power: f32) -> serde_json::Value 
             "real_power_w": measured(snapshot.real_power_sum3),
             "apparent_power_va": measured(snapshot.apparent_power_sum3),
             "reactive_power_var": measured(snapshot.reactive_power_sum3),
-        }
+        },
+        "heartbeat": heartbeat,
     })
 }
 
@@ -538,7 +543,7 @@ async fn monitor(
                             if batch.is_empty() {
                                 flush_deadline = tokio::time::Instant::now() + batch_timeout;
                             }
-                            batch.push(measurement_json(&snapshot, total_power));
+                            batch.push(measurement_json(&snapshot, total_power, !changed));
 
                             println!(
                                 "{} | Batch: {}/{}{}",
@@ -1006,7 +1011,7 @@ mod tests {
     #[test]
     fn measurement_carries_all_three_phases_and_the_measured_sums() {
         let snapshot = sample_snapshot();
-        let measurement = measurement_json(&snapshot, snapshot.real_power_sum3);
+        let measurement = measurement_json(&snapshot, snapshot.real_power_sum3, false);
 
         // The total is the meter's own three-phase sum, not L1 alone.
         assert_eq!(measurement["total_power"], json!(25.6_f32));
@@ -1039,7 +1044,7 @@ mod tests {
 
     #[test]
     fn unavailable_values_are_sent_as_null_rather_than_dropped_or_zeroed() {
-        let measurement = measurement_json(&sample_snapshot(), 25.6);
+        let measurement = measurement_json(&sample_snapshot(), 25.6, false);
 
         // A zero here would claim a distortion-free phase, and a missing field would look
         // like an older client. Null says what is true: the meter could not measure it.
@@ -1057,6 +1062,21 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_says_whether_it_is_a_settled_change_or_a_keepalive() {
+        // The receiver keeps a keepalive as a measurement but leaves it out of device
+        // inference, so the two have to be distinguishable on the wire.
+        let snapshot = sample_snapshot();
+        assert_eq!(
+            measurement_json(&snapshot, 25.6, false)["heartbeat"],
+            json!(false)
+        );
+        assert_eq!(
+            measurement_json(&snapshot, 25.6, true)["heartbeat"],
+            json!(true)
+        );
+    }
+
+    #[test]
     fn exported_power_is_reported_as_a_negative_total() {
         // A site that feeds more into the grid than it draws is normal in a decentralized
         // grid, and the sign has to survive the trip to the server.
@@ -1064,7 +1084,7 @@ mod tests {
         snapshot.real_power = [-1200.0, 0.0, 0.0];
         snapshot.real_power_sum3 = -1200.0;
 
-        let measurement = measurement_json(&snapshot, snapshot.real_power_sum3);
+        let measurement = measurement_json(&snapshot, snapshot.real_power_sum3, false);
         assert_eq!(measurement["total_power"], json!(-1200.0_f32));
         assert_eq!(measurement["l1"]["real_power_w"], json!(-1200.0_f32));
     }

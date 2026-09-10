@@ -203,6 +203,7 @@ fn lab_reading(power: f32, voltage: f32, frequency: f32) -> crate::input::MeterR
             apparent_power_va: Some(power.abs() * 1.1),
             reactive_power_var: Some(-30.0),
         }),
+        heartbeat: false,
     }
 }
 

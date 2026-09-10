@@ -95,12 +95,19 @@ impl MeterState {
         reading: MeterReading,
         decision_method: &mut dyn DecisionMethod,
     ) -> DeviceChange {
-        let change = decision_method.decide_reading(
-            self.latest_reading.as_ref(),
-            &reading,
-            &self.catalog,
-            &self.active_devices,
-        );
+        // A keepalive says the gateway saw no change, and may carry a level it is still
+        // settling on. Feeding one to the decision method would match an intermediate
+        // value against the catalog and then measure the real change from it.
+        let change = if reading.heartbeat {
+            DeviceChange::None
+        } else {
+            decision_method.decide_reading(
+                self.latest_reading.as_ref(),
+                &reading,
+                &self.catalog,
+                &self.active_devices,
+            )
+        };
         let now = Utc::now();
         match change {
             DeviceChange::Added(device) => {
@@ -155,6 +162,46 @@ mod tests {
         state.apply_reading(150.0.into(), &mut method);
         assert_eq!(state.latest_power(), Some(150.0));
         assert_eq!(state.snapshot().readings_received, 2);
+    }
+
+    #[test]
+    fn a_keepalive_is_recorded_but_never_infers_a_device() {
+        use crate::input::MeterReading;
+
+        // Production settling after the client's own filter: one reading is enough.
+        let mut state = MeterState::new(DUMMY_DEVICE_CATALOG.to_vec());
+        let mut method = crate::decision::SettledPowerMatch::new(5.0, 3.0, 1, 8.0);
+
+        state.apply_reading(24.0.into(), &mut method);
+
+        // A level the gateway is still settling on can sit anywhere between two levels.
+        // Matching it would name the wrong device and, worse, leave the real change to be
+        // measured from this intermediate value.
+        let intermediate = MeterReading {
+            heartbeat: true,
+            ..MeterReading::from(89.0)
+        };
+        assert_eq!(
+            state.apply_reading(intermediate, &mut method),
+            DeviceChange::None
+        );
+
+        // It is still a measurement: it counts, and it is the latest reading.
+        assert_eq!(state.latest_power(), Some(89.0));
+        assert_eq!(state.snapshot().readings_received, 2);
+        assert!(state.snapshot().active_devices.is_empty());
+
+        // The settled change that follows is measured from the last real level (24 W), so
+        // the 80 W device that actually switched on is the one that is found. Measured
+        // from the intermediate value instead, the delta would have been 15 W and the
+        // catalog would have named something else entirely.
+        let eighty_watt = DUMMY_DEVICE_CATALOG
+            .iter()
+            .find(|device| device.id == "device-80w")
+            .copied()
+            .expect("the catalog carries the 80 W device");
+        let change = state.apply_reading(104.0.into(), &mut method);
+        assert_eq!(change, DeviceChange::Added(eighty_watt));
     }
 
     #[test]
