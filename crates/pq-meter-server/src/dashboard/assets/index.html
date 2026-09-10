@@ -125,6 +125,31 @@
           </div>
         </div>
 
+        <article class="panel recent-measurements-panel">
+          <div class="panel-heading">
+            <h2>Recent measurements</h2>
+            <span id="history-status" class="small-label">Loading</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Time</th>
+                  <th scope="col">Power (W)</th>
+                  <th scope="col">Voltage L1 (V)</th>
+                  <th scope="col">Current L1 (A)</th>
+                  <th scope="col">Frequency (Hz)</th>
+                </tr>
+              </thead>
+              <tbody id="recent-measurements">
+                <tr>
+                  <td colspan="5" class="empty">No measurements yet</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
         <footer class="page-footer"><span>Voltages phase-to-neutral · Power signed, negative is export · Device power is nominal, not individually measured.</span><span id="last-sync">Not yet synchronized</span></footer>
       </section>
     </main>

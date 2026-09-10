@@ -23,10 +23,11 @@ async function update() {
   try {
     if (++sinceHistory >= HISTORY_EVERY) {
       sinceHistory = 0;
+      overview.historyLoading();
       try {
         overview.history(await fetchHistory());
       } catch {
-        // Keep the last series rather than blanking the charts.
+        overview.historyError();
       }
     }
     snapshot = await fetchState();

@@ -91,9 +91,61 @@ export function createOverview() {
     text('phase-summary', samples.length ? `${integer.format(samples.length)} samples in the last ${history.window_seconds} s` : '—');
   }
 
+  function renderRecentMeasurements(series) {
+    const samples = (series.samples ?? []).slice(-10);
+    const body = byId('recent-measurements');
+    if (!samples.length) {
+      const row = document.createElement('tr');
+      const empty = document.createElement('td');
+      empty.colSpan = 5;
+      empty.className = 'empty';
+      empty.textContent = 'No measurements yet';
+      row.append(empty);
+      body.replaceChildren(row);
+      return;
+    }
+
+    const rows = samples.map(sample => {
+      const row = document.createElement('tr');
+      const values = [
+        time.format(new Date(sample.at)),
+        show(sample.total_power_watts, 1) + ' W',
+        show(sample.voltage_v?.[0], 1) + ' V',
+        show(sample.current_a?.[0], 2) + ' A',
+        show(sample.frequency_hz, 2) + ' Hz',
+      ];
+      for (const value of values) {
+        const cell = document.createElement('td');
+        cell.textContent = value;
+        row.append(cell);
+      }
+      return row;
+    });
+    body.replaceChildren(...rows);
+  }
+
   return {
+    historyLoading() {
+      text('history-status', 'Loading');
+      const cell = document.querySelector('#recent-measurements .empty');
+      if (cell) cell.textContent = 'Loading measurements…';
+    },
+
     history(series) {
       history = series;
+      text('history-status', 'Live');
+      renderRecentMeasurements(series);
+    },
+
+    historyError() {
+      text('history-status', 'Unavailable');
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 5;
+      cell.className = 'empty';
+      cell.textContent = 'History is currently unavailable';
+      row.append(cell);
+      byId('recent-measurements').replaceChildren(row);
     },
 
     render(snapshot) {
