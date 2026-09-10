@@ -191,23 +191,35 @@ async fn monitor(client: &mut Umg605ProClient, period: Duration) -> anyhow::Resu
     loop {
         interval.tick().await;
         let start = Instant::now();
+        
         let voltage_l1 = client.voltage_l1().await?;
-        let elapsed1 = start.elapsed();
         let current_l1 = client.current_l1().await?;
-        let elapsed2 = start.elapsed();
         let power_l1_n = client.power_l1_n().await?;
-        let elapsed3 = start.elapsed();
+        let apparent_power_l1 = client.apparent_power_l1().await?;
+        let reactive_power_l1 = client.reactive_power_l1().await?;
+        let cosphi_l1 = client.cosphi_l1().await?;
+        let thd_voltage_l1 = client.thd_voltage_l1().await?;
+        let thd_current_l1 = client.thd_current_l1().await?;
+        
+        let frequency = client.frequency().await?;
+        let current_sum = client.current_sum().await?;
+        let real_power_sum = client.real_power_sum().await?;
+        let apparent_power_sum = client.apparent_power_sum().await?;
+        let reactive_power_sum = client.reactive_power_sum().await?;
+        
+        let total_elapsed = start.elapsed();
 
-        if elapsed3 > period {
+        if total_elapsed > period {
             eprintln!(
-                "Warning: Reading values took longer than the {:.2?} interval: {:.2?} + {:.2?} + {:.2?} = {:.2?}",
-                period, elapsed1, elapsed2 - elapsed1, elapsed3 - elapsed2, elapsed3
+                "Warning: Reading values took longer than the {:.2?} interval: {:.2?}",
+                period, total_elapsed
             );
         }
 
         println!(
-            "Voltage L1: {:.2} V, Current L1: {:.2} A, Power L1-N: {:.2} W",
-            voltage_l1, current_l1, power_l1_n
+            "L1 [U: {:.2}V, I: {:.2}A, P: {:.2}W, S: {:.2}VA, Q: {:.2}var, PF: {:.2}, THD_U: {:.2}%, THD_I: {:.2}%] | Global [f: {:.2}Hz, I_sum: {:.2}A, P_sum: {:.2}W, S_sum: {:.2}VA, Q_sum: {:.2}var]",
+            voltage_l1, current_l1, power_l1_n, apparent_power_l1, reactive_power_l1, cosphi_l1, thd_voltage_l1, thd_current_l1,
+            frequency, current_sum, real_power_sum, apparent_power_sum, reactive_power_sum
         );
     }
 }
