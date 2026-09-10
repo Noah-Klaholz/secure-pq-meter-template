@@ -25,6 +25,10 @@ run-server:
 	@echo "Starting server on WLAN IP: $(WLAN_IP)"
 	cargo run -p pq-meter-server -- --bind-ip $(WLAN_IP)
 
+build-client-local:
+	@echo "Building client for the local machine..."
+	cargo build -p pq-meter-client
+
 build-client:
 	@echo "Cross-compiling client for Raspberry Pi (aarch64)..."
 	cargo cross build --release -p pq-meter-client --target aarch64-unknown-linux-gnu
