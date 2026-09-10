@@ -39,14 +39,14 @@ const DEFAULT_MODBUS_UNIT: u8 = 1;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 5;
 
-/// How often meter values are read.
-const METER_INTERVAL: Duration = Duration::from_millis(200);
+/// Default interval in milliseconds at which meter values are read.
+const DEFAULT_METER_INTERVAL_MS: u64 = 200;
 
 /// TLS name the server's certificate is issued for.
 const SERVER_NAME: &str = "pq-meter-server";
 
 /// Largest response body we read. The answer of the server is a few bytes.
-const MAX_BODY_SIZE: usize = 1024;
+const MAX_BODY_SIZE: usize = 4096;
 
 /// Command line arguments.
 #[derive(Debug, Parser)]
@@ -87,6 +87,18 @@ struct Args {
     /// Timeout in seconds for connecting and for each register read.
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     meter_timeout: u64,
+
+    /// Interval in milliseconds between meter readings.
+    #[arg(long, visible_alias = "interval", visible_alias = "meter-interval", default_value_t = DEFAULT_METER_INTERVAL_MS)]
+    meter_interval_ms: u64,
+
+    /// Number of measurements to batch before sending (size trigger).
+    #[arg(long, default_value_t = 10)]
+    batch_size: usize,
+
+    /// Maximum time to wait in milliseconds before sending a batch (time trigger).
+    #[arg(long, visible_alias = "batch-time", visible_alias = "batch-timeout", default_value_t = 1000)]
+    batch_timeout_ms: u64,
 }
 
 #[tokio::main]
@@ -147,14 +159,23 @@ async fn main() -> anyhow::Result<()> {
         Umg605ProClient::connect_tcp(meter_socket_addr, Slave(args.meter_unit), meter_timeout)
             .await?;
 
-    println!("streaming meter data to {server_scion}{} ...", args.path);
+    let meter_interval = Duration::from_millis(args.meter_interval_ms.max(1));
+    let batch_size = args.batch_size.max(1);
+    let batch_timeout = Duration::from_millis(args.batch_timeout_ms.max(1));
+
+    println!(
+        "streaming meter data to {server_scion}{} (interval: {meter_interval:.2?}, batch size: {batch_size}, timeout: {batch_timeout:.2?}) ...",
+        args.path
+    );
 
     monitor(
         &mut meter_client,
         &client,
         &server_scion,
         &args.path,
-        METER_INTERVAL,
+        meter_interval,
+        batch_size,
+        batch_timeout,
     )
     .await?;
 
@@ -163,9 +184,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reads the meter every `period` and pushes each reading to the server over SCION.
+/// Reads the meter every `period` and pushes batched readings to the server over SCION
+/// when either the size trigger (`batch_size`) or time trigger (`batch_timeout`) fires.
 ///
-/// `http` is reused across ticks, so only the first request pays for the QUIC handshake.
+/// `http` is reused across flushes, so only the first request pays for the QUIC handshake.
 /// A failed request is reported and the loop continues: a gateway that gives up on the
 /// first network hiccup is of no use in the field.
 async fn monitor(
@@ -174,94 +196,158 @@ async fn monitor(
     server: &ScionSocketIpAddr,
     path: &str,
     period: Duration,
+    batch_size: usize,
+    batch_timeout: Duration,
 ) -> anyhow::Result<()> {
     // The URL holds the server name and the port. `target` gives the SCION address the
     // packets go to, so the simulated network needs no DNS.
     let url = format!("https://{SERVER_NAME}:{}{}", server.port(), path);
 
     let mut interval = tokio::time::interval(period);
+    let mut batch: Vec<serde_json::Value> = Vec::with_capacity(batch_size);
+    let mut flush_deadline = tokio::time::Instant::now() + batch_timeout;
+
     loop {
-        interval.tick().await;
-        let start = Instant::now();
+        tokio::select! {
+            _ = interval.tick() => {
+                let start = Instant::now();
 
-        let Snapshot {
-            systime,
-            frequency,
-            voltage_l1,
-            current_l1,
-            real_power_l1,
-            apparent_power_l1,
-            reactive_power_l1,
-            cos_phi_l1,
-            real_energy_consumed_l1,
-            thd_current_l1,
-        } = meter.snapshot().await?;
+                let Snapshot {
+                    systime,
+                    frequency,
+                    voltage_l1,
+                    current_l1,
+                    real_power_l1,
+                    apparent_power_l1,
+                    reactive_power_l1,
+                    cos_phi_l1,
+                    real_energy_consumed_l1,
+                    thd_current_l1,
+                } = meter.snapshot().await?;
 
-        let read_elapsed = start.elapsed();
+                let read_elapsed = start.elapsed();
 
-        let measurement = serde_json::json!({
-            // The server's decision logic reads this one. The rest is context it ignores
-            // today but can grow into.
-            "total_power": real_power_l1,
-            "systime": systime,
-            "frequency_hz": frequency,
-            "l1": {
-                "voltage_v": voltage_l1,
-                "current_a": current_l1,
-                "real_power_w": real_power_l1,
-                "apparent_power_va": apparent_power_l1,
-                "reactive_power_var": reactive_power_l1,
-                "cos_phi": cos_phi_l1,
-                "real_energy_consumed_wh": real_energy_consumed_l1,
-                "thd_current_pct": thd_current_l1,
-            }
-        });
-        let body = serde_json::to_vec(&measurement).context("encoding the measurement")?;
+                let measurement = serde_json::json!({
+                    // The server's decision logic reads this one. The rest is context it ignores
+                    // today but can grow into.
+                    "total_power": real_power_l1,
+                    "systime": systime,
+                    "frequency_hz": frequency,
+                    "l1": {
+                        "voltage_v": voltage_l1,
+                        "current_a": current_l1,
+                        "real_power_w": real_power_l1,
+                        "apparent_power_va": apparent_power_l1,
+                        "reactive_power_var": reactive_power_l1,
+                        "cos_phi": cos_phi_l1,
+                        "real_energy_consumed_wh": real_energy_consumed_l1,
+                        "thd_current_pct": thd_current_l1,
+                    }
+                });
 
-        let request = Request::post(&url)
-            .header("content-type", "application/json")
-            .target(server.host())
-            .body(body)
-            .build()
-            .context("building the request")?;
-
-        match http.request(request).await {
-            Ok(response) => {
-                let status = response.status();
-                if !status.is_success() {
-                    eprintln!("Warning: server answered with {status}");
+                if batch.is_empty() {
+                    flush_deadline = tokio::time::Instant::now() + batch_timeout;
                 }
-                // The body is drained even when it is not used, so the stream is closed
-                // and the connection can be reused by the next tick.
-                let _ = response.text(Some(MAX_BODY_SIZE)).await;
+                batch.push(measurement);
+
+                println!(
+                    "Time: {} | Freq: {:.2}Hz | L1 [U: {:.2}V, I: {:.2}A, P: {:.2}W, S: {:.2}VA, Q: {:.2}var, PF: {:.2}, Energy: {:.2}Wh, THD_I: {:.2}%] | Batch: {}/{}",
+                    systime,
+                    frequency,
+                    voltage_l1,
+                    current_l1,
+                    real_power_l1,
+                    apparent_power_l1,
+                    reactive_power_l1,
+                    cos_phi_l1,
+                    real_energy_consumed_l1,
+                    thd_current_l1,
+                    batch.len(),
+                    batch_size
+                );
+
+                if read_elapsed > period {
+                    eprintln!(
+                        "Warning: Reading took longer than the {:.2?} interval: {:.2?}",
+                        period, read_elapsed
+                    );
+                }
+
+                let should_flush_size = batch.len() >= batch_size;
+                let should_flush_time = tokio::time::Instant::now() >= flush_deadline;
+
+                if should_flush_size || should_flush_time {
+                    let reason = if should_flush_size { "size trigger" } else { "time trigger" };
+                    send_batch(http, &url, server, &mut batch, reason).await;
+                    flush_deadline = tokio::time::Instant::now() + batch_timeout;
+                }
             }
-            Err(error) => eprintln!("Warning: sending the measurement failed: {error}"),
+            _ = tokio::time::sleep_until(flush_deadline), if !batch.is_empty() => {
+                send_batch(http, &url, server, &mut batch, "time trigger").await;
+                flush_deadline = tokio::time::Instant::now() + batch_timeout;
+            }
         }
+    }
+}
 
-        let total_elapsed = start.elapsed();
+/// Sends buffered measurements to the server over SCION HTTP/3.
+async fn send_batch(
+    http: &Client,
+    url: &str,
+    server: &ScionSocketIpAddr,
+    batch: &mut Vec<serde_json::Value>,
+    reason: &str,
+) {
+    if batch.is_empty() {
+        return;
+    }
 
-        if total_elapsed > period {
-            eprintln!(
-                "Warning: Reading and sending took longer than the {:.2?} interval: {:.2?} read + {:.2?} send = {:.2?}",
-                period,
-                read_elapsed,
-                total_elapsed - read_elapsed,
-                total_elapsed
-            );
+    let count = batch.len();
+    let body = match serde_json::to_vec(batch) {
+        Ok(b) => b,
+        Err(err) => {
+            eprintln!("Warning: encoding the measurement batch failed: {err}");
+            batch.clear();
+            return;
         }
+    };
+    batch.clear();
 
-        println!(
-            "Time: {} | Freq: {:.2}Hz | L1 [U: {:.2}V, I: {:.2}A, P: {:.2}W, S: {:.2}VA, Q: {:.2}var, PF: {:.2}, Energy: {:.2}Wh, THD_I: {:.2}%]",
-            systime,
-            frequency,
-            voltage_l1,
-            current_l1,
-            real_power_l1,
-            apparent_power_l1,
-            reactive_power_l1,
-            cos_phi_l1,
-            real_energy_consumed_l1,
-            thd_current_l1
-        );
+    let request = match Request::post(url)
+        .header("content-type", "application/json")
+        .target(server.host())
+        .body(body)
+        .build()
+    {
+        Ok(req) => req,
+        Err(err) => {
+            eprintln!("Warning: building the batch request failed: {err}");
+            return;
+        }
+    };
+
+    let send_start = Instant::now();
+    match http.request(request).await {
+        Ok(response) => {
+            let status = response.status();
+            let elapsed = send_start.elapsed();
+            if !status.is_success() {
+                eprintln!("Warning: server answered with {status} ({elapsed:.2?})");
+            }
+            match response.text(Some(MAX_BODY_SIZE)).await {
+                Ok((text, _)) => {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        println!("Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}: {trimmed}");
+                    } else {
+                        println!("Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}");
+                    }
+                }
+                Err(_) => {
+                    println!("Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}");
+                }
+            }
+        }
+        Err(error) => eprintln!("Warning: sending the batch failed: {error}"),
     }
 }
