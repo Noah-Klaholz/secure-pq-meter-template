@@ -15,4 +15,8 @@ impl<T> History<T> {
             entries: Vec::new(),
         }
     }
+
+    pub fn push(&mut self, data: T, timestamp: SystemTime) {
+        self.entries.push(HistoryEntry { timestamp, data });
+    }
 }
