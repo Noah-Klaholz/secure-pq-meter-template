@@ -106,46 +106,43 @@ impl Umg605ProClient {
 // Register reading functions for the Umg605Pro device.
 impl Umg605ProClient {
 
-    // --- L1 Variants ---
+    pub async fn voltage_l1(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(19000).await
+    }
 
-    /// Fetches the voltage of phase L1 in volts.
-    pub async fn voltage_l1(&mut self) -> Result<f32, ReadError> { self.read_f32(19000).await }
+    pub async fn current_l1(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(19012).await
+    }
 
-    /// Fetches the current of phase L1 in amperes.
-    pub async fn current_l1(&mut self) -> Result<f32, ReadError> { self.read_f32(19012).await }
+    pub async fn real_power_l1(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(19020).await
+    }
 
-    /// Fetches the active power of phase L1 to neutral in watts.
-    pub async fn power_l1_n(&mut self) -> Result<f32, ReadError> { self.read_f32(19020).await }
+    pub async fn apparent_power_l1(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(19028).await
+    }
 
-    /// Fetches the apparent power of phase L1 in VA.
-    pub async fn apparent_power_l1(&mut self) -> Result<f32, ReadError> { self.read_f32(19028).await }
+    pub async fn reactive_power_l1(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(19036).await
+    }
 
-    /// Fetches the reactive power of phase L1 in var.
-    pub async fn reactive_power_l1(&mut self) -> Result<f32, ReadError> { self.read_f32(19036).await }
+    pub async fn cos_phi_l1(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(19044).await
+    }
 
-    /// Fetches the CosPhi (power factor) of phase L1.
-    pub async fn cosphi_l1(&mut self) -> Result<f32, ReadError> { self.read_f32(19044).await }
+    pub async fn frequency(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(19050).await
+    }
 
-    /// Fetches the THD (Total Harmonic Distortion) Voltage L1-N in %.
-    pub async fn thd_voltage_l1(&mut self) -> Result<f32, ReadError> { self.read_f32(19110).await }
+    pub async fn real_energy_consumed_l1(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(19062).await
+    }
 
-    /// Fetches the THD (Total Harmonic Distortion) Current L1 in %.
-    pub async fn thd_current_l1(&mut self) -> Result<f32, ReadError> { self.read_f32(19116).await }
+    pub async fn thd_current_l1(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(19116).await
+    }
 
-    // --- Global Variants ---
-
-    /// Fetches the measured frequency in Hz.
-    pub async fn frequency(&mut self) -> Result<f32, ReadError> { self.read_f32(19050).await }
-
-    /// Fetches the vector sum of Current (I1 + I2 + I3) in amperes.
-    pub async fn current_sum(&mut self) -> Result<f32, ReadError> { self.read_f32(19018).await }
-
-    /// Fetches the sum of Real power (P1 + P2 + P3) in watts.
-    pub async fn real_power_sum(&mut self) -> Result<f32, ReadError> { self.read_f32(19026).await }
-
-    /// Fetches the sum of Apparent power (S1 + S2 + S3) in VA.
-    pub async fn apparent_power_sum(&mut self) -> Result<f32, ReadError> { self.read_f32(19034).await }
-
-    /// Fetches the sum of Reactive power (Q1 + Q2 + Q3) in var.
-    pub async fn reactive_power_sum(&mut self) -> Result<f32, ReadError> { self.read_f32(19042).await }
+    pub async fn systime(&mut self) -> Result<i32, ReadError> {
+        self.read_i32(4).await
+    }
 }
