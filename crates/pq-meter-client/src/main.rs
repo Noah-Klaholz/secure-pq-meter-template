@@ -246,7 +246,7 @@ impl SettledMonitor {
         }
     }
 
-    /// Processes a new reading. Returns `true` if this reading should be printed
+    /// Processes a new reading. Returns `true` if this reading should be recorded
     /// (and committed as the new baseline).
     fn process_reading(&mut self, current: BaselineReading, now: Instant) -> bool {
         let Some(base) = self.baseline else {
@@ -291,7 +291,7 @@ impl SettledMonitor {
 /// Reads the meter every `period` and pushes batched readings to the server over SCION
 /// when either the size trigger (`batch_size`) or time trigger (`batch_timeout`) fires.
 ///
-/// Output is printed to the console only when changes exceed the noise threshold
+/// Readings are recorded and printed only when changes exceed the noise threshold
 /// and remain settled for `SETTLING_WINDOW`.
 async fn monitor(
     meter: &mut Umg605ProClient,
@@ -349,11 +349,6 @@ async fn monitor(
                     }
                 });
 
-                if batch.is_empty() {
-                    flush_deadline = tokio::time::Instant::now() + batch_timeout;
-                }
-                batch.push(measurement);
-
                 let current_reading = BaselineReading {
                     frequency,
                     voltage_l1,
@@ -367,6 +362,11 @@ async fn monitor(
                 };
 
                 if settled_monitor.process_reading(current_reading, start) {
+                    if batch.is_empty() {
+                        flush_deadline = tokio::time::Instant::now() + batch_timeout;
+                    }
+                    batch.push(measurement);
+
                     println!(
                         "Time: {} | Freq: {:.2}Hz | L1 [U: {:.2}V, I: {:.2}A, P: {:.2}W, S: {:.2}VA, Q: {:.2}var, PF: {:.2}, Energy: {:.2}Wh, THD_I: {:.2}%] | Batch: {}/{}",
                         systime,
@@ -392,7 +392,8 @@ async fn monitor(
                 }
 
                 let should_flush_size = batch.len() >= batch_size;
-                let should_flush_time = tokio::time::Instant::now() >= flush_deadline;
+                let should_flush_time =
+                    !batch.is_empty() && tokio::time::Instant::now() >= flush_deadline;
 
                 if should_flush_size || should_flush_time {
                     let reason = if should_flush_size { "size trigger" } else { "time trigger" };
