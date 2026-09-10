@@ -10,24 +10,32 @@ pub struct History<T> {
 }
 
 impl<T> History<T> {
+    /// Creates an empty history.
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
         }
     }
 
+    /// Adds a new history entry with the given timestamp.
     pub fn push(&mut self, data: T, timestamp: SystemTime) {
         self.entries.push(HistoryEntry { timestamp, data });
     }
 
+    /// Returns the most recently added entry, if one exists.
     pub fn latest(&self) -> Option<&HistoryEntry<T>> {
         self.entries.last()
     }
 
+    /// Returns all history entries in insertion order.
     pub fn all(&self) -> &[HistoryEntry<T>] {
         &self.entries
     }
 
+    /// Returns up to the last `n` entries.
+    ///
+    /// If `n` is greater than the number of stored entries,
+    /// the complete history is returned.
     pub fn recent(&self, n: usize) -> &[HistoryEntry<T>] {
         let start = self.entries.len().saturating_sub(n);
         &self.entries[start..]
