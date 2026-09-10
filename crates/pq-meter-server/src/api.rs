@@ -23,10 +23,10 @@ pub const SERVER_NAME: &str = "pq-meter-server";
 pub type SharedDecisionMethod = Arc<Mutex<Box<dyn DecisionMethod>>>;
 
 #[derive(Clone)]
-struct AppState {
-    meter: SharedMeterState,
-    decision_method: SharedDecisionMethod,
-    reading_decoder: SharedReadingDecoder,
+pub(crate) struct AppState {
+    pub(crate) meter: SharedMeterState,
+    pub(crate) decision_method: SharedDecisionMethod,
+    pub(crate) reading_decoder: SharedReadingDecoder,
 }
 
 /// Serves the HTTP/3 application on `socket` until the process is stopped.
@@ -50,7 +50,7 @@ pub async fn serve(
         .map_err(|error| anyhow::anyhow!("HTTP/3 server stopped: {error}"))
 }
 
-fn router(path: &str, state: AppState) -> Router {
+pub(crate) fn router(path: &str, state: AppState) -> Router {
     Router::new().route(path, post(receive)).with_state(state)
 }
 

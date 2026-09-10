@@ -16,6 +16,9 @@ mod input;
 mod meter;
 mod network;
 
+#[cfg(test)]
+mod e2e_pipeline_test;
+
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},

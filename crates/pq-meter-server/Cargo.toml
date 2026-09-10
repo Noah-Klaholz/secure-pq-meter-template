@@ -27,4 +27,6 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+tokio-modbus = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
+umg605-modbus-client = { workspace = true }

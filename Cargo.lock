@@ -3107,9 +3107,11 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-modbus",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "umg605-modbus-client",
  "url",
 ]
 

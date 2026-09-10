@@ -404,4 +404,115 @@ mod tests {
         assert!(contains_device(&[TEST_DEVICE], "test-device"));
         assert!(!contains_device(&[TEST_DEVICE], "other-device"));
     }
+
+    #[test]
+    fn threshold_exact_boundaries() {
+        let mut method = SettledPowerMatch::new(5.0, 3.0, 2, 5.0);
+        method.decide(None, 100.0, TEST_CATALOG, &[]); // baseline = 100.0
+
+        // Delta of 4.9 W (< 5.0 W minimum_change_watts) should be absorbed as baseline drift
+        assert_eq!(
+            method.decide(Some(100.0), 104.9, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+        // Settled baseline is now 104.9.
+        // A delta of exactly 5.0 W (109.9 W) is NOT < 5.0, so it initiates candidate settling
+        assert_eq!(
+            method.decide(Some(104.9), 109.9, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+    }
+
+    #[test]
+    fn threshold_settle_tolerance_boundary() {
+        let mut method = SettledPowerMatch::new(5.0, 3.0, 3, 5.0);
+        method.decide(None, 100.0, TEST_CATALOG, &[]);
+
+        // Reading 1: 160.0 (jump of 60 W, candidate average 160.0, count 1)
+        method.decide(Some(100.0), 160.0, TEST_CATALOG, &[]);
+
+        // Reading 2: 163.0 (diff from 160.0 is exactly 3.0, <= settle_tolerance_watts 3.0)
+        // Stays within tolerance: running average = 160 + 3/2 = 161.5, count 2
+        method.decide(Some(160.0), 163.0, TEST_CATALOG, &[]);
+
+        // Reading 3: 164.5 (diff from 161.5 is 3.0, <= 3.0)
+        // Reaches 3 stable readings: average = 161.5 + 3/3 = 162.5
+        // Settled delta = 162.5 - 100.0 = 62.5 W
+        // TEST_DEVICE is 60.0 W, diff 2.5 <= 5.0 W match tolerance -> Added!
+        assert_eq!(
+            method.decide(Some(163.0), 164.5, TEST_CATALOG, &[]),
+            DeviceChange::Added(TEST_DEVICE)
+        );
+    }
+
+    #[test]
+    fn threshold_device_match_tolerance_boundary() {
+        let mut method = SettledPowerMatch::new(5.0, 1.0, 2, 5.0);
+        method.decide(None, 100.0, TEST_CATALOG, &[]);
+
+        // Delta is 65.0 W (diff from 60.0 W is exactly 5.0 W == tolerance 5.0) -> MATCHES
+        method.decide(Some(100.0), 165.0, TEST_CATALOG, &[]);
+        assert_eq!(
+            method.decide(Some(165.0), 165.0, TEST_CATALOG, &[]),
+            DeviceChange::Added(TEST_DEVICE)
+        );
+
+        // Reset with new method
+        let mut method2 = SettledPowerMatch::new(5.0, 1.0, 2, 5.0);
+        method2.decide(None, 100.0, TEST_CATALOG, &[]);
+
+        // Delta is 65.1 W (diff from 60.0 W is 5.1 W > tolerance 5.0) -> FAILS TO MATCH
+        method2.decide(Some(100.0), 165.1, TEST_CATALOG, &[]);
+        assert_eq!(
+            method2.decide(Some(165.1), 165.1, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+    }
+
+    #[test]
+    fn threshold_creeping_power_drift_is_absorbed_without_detection() {
+        let mut method = SettledPowerMatch::new(5.0, 3.0, 2, 5.0);
+        method.decide(None, 100.0, TEST_CATALOG, &[]);
+
+        // Slow ramp 2 W at a time from 100 to 160 W (cumulative +60 W, matching TEST_DEVICE)
+        // Since every individual jump is 2 W < 5.0 W (minimum_change_watts), it is absorbed as baseline drift
+        for p in (102..=160).step_by(2) {
+            let change = method.decide(Some((p - 2) as f32), p as f32, TEST_CATALOG, &[]);
+            assert_eq!(change, DeviceChange::None);
+        }
+    }
+
+    #[test]
+    fn threshold_distinguishes_close_catalog_devices() {
+        let mut method = ClosestPowerMatch::new(5.0);
+
+        // Delta of 63.5 W is within 5W of both Handy (60W, diff 3.5) and iPhone (65W, diff 1.5)
+        // Must pick the closest (iPhone)
+        let change = method.decide(Some(100.0), 163.5, DUMMY_DEVICE_CATALOG, &[]);
+        assert_eq!(change, DeviceChange::Added(DUMMY_DEVICE_CATALOG[1])); // noah-iphone
+
+        // If iPhone is already active, subsequent delta of 63.5W picks the next closest (Handy)
+        let active = [DUMMY_DEVICE_CATALOG[1]];
+        let change2 = method.decide(Some(163.5), 227.0, DUMMY_DEVICE_CATALOG, &active);
+        assert_eq!(change2, DeviceChange::Added(DUMMY_DEVICE_CATALOG[3])); // chris-handy
+    }
+
+    #[test]
+    fn threshold_device_power_below_minimum_change_cannot_trigger() {
+        const LOW_POWER_DEVICE: Device = Device::new("low-power", "Low Power", 3.0);
+        let catalog = &[LOW_POWER_DEVICE];
+        let mut method = SettledPowerMatch::new(5.0, 1.0, 2, 5.0);
+
+        method.decide(None, 100.0, catalog, &[]);
+        // Device turns on with +3.0 W delta (103.0 W)
+        // 3.0 < 5.0 (minimum_change_watts), so it is absorbed as baseline fluctuation
+        assert_eq!(
+            method.decide(Some(100.0), 103.0, catalog, &[]),
+            DeviceChange::None
+        );
+        assert_eq!(
+            method.decide(Some(103.0), 103.0, catalog, &[]),
+            DeviceChange::None
+        );
+    }
 }
