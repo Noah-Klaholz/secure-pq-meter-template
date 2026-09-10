@@ -23,6 +23,8 @@ crates/
     src/main.rs            Command line interface, starts everything
     src/network.rs         The simulated SCION network (which ASes, which addresses)
     src/api.rs             The HTTP/3 endpoint that receives the data
+    src/meter.rs           Shared current state, independent of either HTTP transport
+    src/dashboard/         Local dashboard, versioned read API, and embedded UI assets
   pq-meter-client/         Runs on the gateway
     src/main.rs            Sends one message and prints the answer
   umg605-modbus-client/    Reads data from a UMG 605-PRO power quality meter over Modbus TCP
@@ -77,6 +79,9 @@ In the first terminal:
 ```bash
 cargo run -p pq-meter-server
 ```
+
+The server also starts a local dashboard at **http://127.0.0.1:8080/**. See
+[Local dashboard](#local-dashboard) for configuration and the extension points.
 
 It prints, among the log lines:
 
@@ -159,6 +164,77 @@ Two more things to check when the ports look fine:
   answer leaves through your WLAN interface, and disconnect the VPN while you work.
 * The Pi and the laptop have to be on the **same network**, and it must not be a guest WLAN —
   those often block traffic between devices.
+
+## Local dashboard
+
+Run the server, then open [PQ Monitor](http://127.0.0.1:8080/) in a browser:
+
+```bash
+cargo run -p pq-meter-server
+# Choose another port (0 selects an available port, printed at startup):
+cargo run -p pq-meter-server -- --dashboard-port 8081
+# Run only the SCION receiver:
+cargo run -p pq-meter-server -- --no-dashboard
+```
+
+The dashboard always binds to `127.0.0.1`, independently of `--bind-ip`, so making SCION
+reachable from the gateway does not expose the dashboard to the network. HTML, CSS, and
+JavaScript are embedded in the Rust binary; there is no frontend build, CDN, or extra
+process to start. Recompile the server after editing an asset.
+
+The overview refreshes once per second and shows:
+
+- The latest accepted total-power reading, in watts.
+- Inferred active devices and their summed nominal catalog power.
+- All catalog entries, the latest device addition/removal, and the selected decision method.
+- Accepted reading count and the server receipt time of the last reading.
+
+Before a reading arrives, measurements show as unavailable. After ten seconds without an
+accepted reading, the view marks the retained state as stale. If the dashboard API becomes
+unreachable, it preserves the last view, marks it disconnected, and retries automatically.
+Polling pauses in background tabs and resumes when they become visible.
+
+Device activity is inferred from **changes** in total power. The first reading establishes
+a baseline; a device already on at startup is not automatically identified. “Not detected”
+is therefore not a confirmed off state, and nominal catalog power is not an individual
+measurement. The receiver currently decodes only `total_power` (and its existing aliases);
+the gateway's extra voltage, frequency, and other fields are not stored or displayed yet.
+
+### Dashboard architecture and future history
+
+`meter.rs` owns the current application state. The SCION ingestion handler updates it only
+after a reading has been decoded and accepted. It records receipt time, reading count, and
+the latest actual device change alongside the existing power and device state.
+
+`dashboard/model.rs` defines the dashboard's serializable read model and `SnapshotSource`
+interface. `LiveMeterSource` takes a consistent copy of meter state under a short lock,
+then builds the response after releasing it. The dashboard never calls the decision engine
+or mutates the meter. Alternative sources can implement the same interface.
+
+`dashboard/mod.rs` serves the embedded assets and read-only `GET /api/v1/state` endpoint.
+The response includes `schema_version`, server timestamps, the stale threshold, power,
+reading count, device states, and the last change. Responses disable caching. No reading
+is represented as JSON `null`, not zero. An unavailable store returns a JSON error with
+HTTP 503; mutation requests are not supported.
+
+The frontend separates HTTP requests (`assets/api.js`), polling and lifecycle
+(`assets/app.js`), and rendering (`assets/overview.js`). Add future views alongside the
+overview, with their own API functions and navigation entries.
+
+There is **no historical storage yet**: only one current state and the last device change
+are retained, and a server restart resets them. To add history, record timestamped accepted
+readings and device changes at the ingestion boundary, use bounded retention or persistent
+storage, and expose a separate time-range/paginated endpoint (for example,
+`GET /api/v1/history`). Keep historical queries separate from the lightweight live snapshot;
+do not grow the shared state or live response into an unbounded event list.
+
+Validation for this module:
+
+```bash
+cargo test -p pq-meter-server
+cargo clippy -p pq-meter-server --all-targets -- -D warnings
+cargo fmt -p pq-meter-server -- --check
+```
 
 ## Read from the meter
 

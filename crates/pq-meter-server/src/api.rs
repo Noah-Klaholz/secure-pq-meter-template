@@ -8,8 +8,9 @@ use scion_h3_axum::ScionH3AxumServer;
 use scion_quic::{quic::config::QuicConfig, reexport::squiche, socket::GenericScionUdpSocket};
 
 use crate::{
-    decision::{DecisionMethod, Device, DeviceChange, contains_device},
+    decision::{DecisionMethod, DeviceChange},
     input::SharedReadingDecoder,
+    meter::SharedMeterState,
 };
 
 /// Path the server accepts POST requests on.
@@ -19,53 +20,6 @@ pub const DEFAULT_PATH: &str = "/edh/v1/hello";
 /// issued for this name.
 pub const SERVER_NAME: &str = "pq-meter-server";
 
-/// Mutable meter state shared by all requests.
-pub struct MeterState {
-    catalog: Vec<Device>,
-    active_devices: Vec<Device>,
-    previous_total_power: Option<f32>,
-}
-
-impl MeterState {
-    pub fn new(catalog: Vec<Device>) -> Self {
-        Self {
-            catalog,
-            active_devices: Vec::new(),
-            previous_total_power: None,
-        }
-    }
-
-    fn apply_reading(
-        &mut self,
-        total_power: f32,
-        decision_method: &mut dyn DecisionMethod,
-    ) -> DeviceChange {
-        let change = decision_method.decide(
-            self.previous_total_power,
-            total_power,
-            &self.catalog,
-            &self.active_devices,
-        );
-
-        match change {
-            DeviceChange::Added(device) => {
-                if !contains_device(&self.active_devices, device.id) {
-                    self.active_devices.push(device);
-                }
-            }
-            DeviceChange::Removed(device) => {
-                self.active_devices
-                    .retain(|active_device| active_device.id != device.id);
-            }
-            DeviceChange::None => {}
-        }
-
-        self.previous_total_power = Some(total_power);
-        change
-    }
-}
-
-pub type SharedMeterState = Arc<Mutex<MeterState>>;
 pub type SharedDecisionMethod = Arc<Mutex<Box<dyn DecisionMethod>>>;
 
 #[derive(Clone)]
@@ -124,7 +78,7 @@ async fn receive(State(state): State<AppState>, body: Bytes) -> (StatusCode, Str
         }
     };
 
-    let was_first_reading = meter.previous_total_power.is_none();
+    let was_first_reading = meter.latest_power().is_none();
     let change = meter.apply_reading(total_power, decision_method.as_mut());
     let response = match change {
         DeviceChange::Added(device) => {
@@ -194,7 +148,44 @@ fn path_of(file: &tempfile::NamedTempFile) -> anyhow::Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decision::{ClosestPowerMatch, DUMMY_DEVICE_CATALOG};
+    use crate::{
+        decision::{ClosestPowerMatch, DUMMY_DEVICE_CATALOG},
+        meter::MeterState,
+    };
+
+    #[tokio::test]
+    async fn only_accepted_requests_update_the_dashboard_state() {
+        use crate::dashboard::model::{LiveMeterSource, SnapshotSource};
+        let meter = Arc::new(Mutex::new(MeterState::new(DUMMY_DEVICE_CATALOG.to_vec())));
+        let state = AppState {
+            meter: meter.clone(),
+            decision_method: Arc::new(Mutex::new(Box::new(ClosestPowerMatch::new(3.0)))),
+            reading_decoder: Arc::new(crate::input::DummyJsonDecoder),
+        };
+        let source = LiveMeterSource {
+            meter,
+            decision_method: "immediate",
+        };
+        for body in [r#"{"total_power":100}"#, r#"{"total_power":123}"#] {
+            assert_eq!(
+                receive(State(state.clone()), Bytes::from(body)).await.0,
+                StatusCode::OK
+            );
+        }
+        let before = source.snapshot().unwrap();
+        assert_eq!(before.readings_received, 2);
+        assert!(before.devices[0].active);
+        assert_eq!(
+            receive(State(state), Bytes::from_static(br#"{"total_power":-1}"#))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let after = source.snapshot().unwrap();
+        assert_eq!(after.readings_received, before.readings_received);
+        assert_eq!(after.last_received_at, before.last_received_at);
+        assert_eq!(after.total_power_watts, Some(123.0));
+    }
 
     #[test]
     fn applies_addition_and_removal_decisions_to_state() {
@@ -210,6 +201,6 @@ mod tests {
             state.apply_reading(100.0, &mut method),
             DeviceChange::Removed(DUMMY_DEVICE_CATALOG[0])
         );
-        assert!(state.active_devices.is_empty());
+        assert!(state.snapshot().active_devices.is_empty());
     }
 }
