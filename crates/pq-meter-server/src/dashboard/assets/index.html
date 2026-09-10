@@ -101,9 +101,9 @@
             <p class="panel-footnote">Voltage and frequency limits follow EN 50160. Current distortion is reported as a warning above <span id="thd-current-note">1 A</span>, since the ratio is not meaningful at idle.</p>
           </article>
           <article class="panel devices-panel">
-            <div class="panel-heading"><div><h2>Device activity</h2><p>Secondary: catalog matches inferred from changes in P, Q and THD</p></div><span id="device-summary" class="small-label">—</span></div>
-            <div class="table-wrap"><table><thead><tr><th scope="col">Device</th><th scope="col">Nominal profile (P, Q, THD)</th><th scope="col">Inferred state</th></tr></thead><tbody id="devices"><tr><td colspan="3" class="empty">Waiting for the receiver…</td></tr></tbody></table></div>
-            <p class="panel-footnote">Device states are estimates. The initial reading establishes a baseline; devices already drawing power may not be identified.</p>
+            <div class="panel-heading"><div><h2>Device activity</h2><p>Secondary: signatures learned at runtime from P/Q step changes</p></div><span id="device-summary" class="small-label">—</span></div>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Device</th><th scope="col">Signature (ΔP, ΔQ)</th><th scope="col">Inferred state</th></tr></thead><tbody id="devices"><tr><td colspan="3" class="empty">Waiting for the receiver…</td></tr></tbody></table></div>
+            <p class="panel-footnote">Device states are estimates. The first accepted reading becomes the always-on background; each later settled step in real/reactive power is matched to a known device or added as a new one. Devices already switching before the first reading are folded into the background.</p>
           </article>
           </div>
           <div class="side-panels">

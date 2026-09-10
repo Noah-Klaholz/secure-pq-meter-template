@@ -236,8 +236,9 @@ Missing context is omitted from that object; a value the meter could not determi
 `null` there, so the two remain distinguishable. Before any readings it is `null`. A later
 power-only reading replaces the previous context rather than retaining stale values.
 The server receipt timestamp (`last_received_at`) remains separate from meter `systime`.
-Only the latest reading is retained; the dashboard UI and device algorithms still use
-`total_power`.
+Only the latest reading is retained. `total_power` is the authoritative signal for every
+decision method; the `adaptive` method additionally uses the L1 reactive power and THD_I
+from `l1` when present, and falls back to power-only behaviour when it is not.
 
 ## Local dashboard
 
@@ -294,6 +295,33 @@ Two judgements are deliberately narrower than "compare against the limit":
 
 A value the meter reported as unavailable is never a violation: an unknown value is not a
 measured excursion.
+
+### Device fingerprinting (`--decision-method`)
+
+Device activity is inferred from **changes** in electrical signature, not from absolute
+power, and is kept as a secondary panel. The first accepted reading establishes a baseline;
+a device already on at startup is folded into the background and not identified
+individually, so “not detected” is not a confirmed off state. A reading marked
+`"heartbeat": true` is recorded but skipped for inference.
+
+`decision.rs` provides interchangeable inference methods. The default is `adaptive`:
+
+* **`adaptive` — training-free online NILM.** No predefined catalog. The first accepted
+  reading is taken as the always-on **background** (here, the two Raspberry Pis, ~23 W)
+  and never reported as an event. Every later *settled* step change is an **edge** in
+  `(ΔP, ΔQ, ΔI_dist)` space, where `I_dist = I_rms · THD_I / 100` is the harmonic
+  (distortion) current — the three quantities that stay roughly additive across parallel
+  loads. An edge is matched by normalised nearest-neighbour distance to a device learned
+  earlier; an unmatched turn-on adds a new one (`Device N (~W)`). Turn-offs match the
+  negated edge against active devices. This is Hart's P–Q signature approach with a
+  harmonic axis. It trusts the gateway's own settling window, so it decides on a
+  single sample per edge (`required_samples = 1`); the learned set is bounded (32).
+* **`settled` / `immediate` / `multi-feature`** keep the static `DUMMY_DEVICE_CATALOG` and
+  match power (and, for `multi-feature`, Q and THD) deltas against fixed nominal profiles.
+  These are only useful when the catalog has been hand-calibrated for the devices present.
+
+The inferred-power sum on the dashboard adds the background plus each active device's ΔP,
+so under `adaptive` it approximates a real disaggregation of the measured total.
 
 ### Transport telemetry
 

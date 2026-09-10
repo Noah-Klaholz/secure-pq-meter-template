@@ -108,9 +108,27 @@ impl MeterState {
                 &self.active_devices,
             )
         };
+
+        // Reflect any devices the method has learned at runtime in the live catalog,
+        // refreshing the signature of ones already known. Static-catalog methods
+        // return nothing here, so this is a no-op for them.
+        for learned in decision_method.learned_devices() {
+            match self
+                .catalog
+                .iter_mut()
+                .find(|device| device.id == learned.id)
+            {
+                Some(existing) => *existing = learned,
+                None => self.catalog.push(learned),
+            }
+        }
+
         let now = Utc::now();
         match change {
             DeviceChange::Added(device) => {
+                if !contains_device(&self.catalog, device.id) {
+                    self.catalog.push(device);
+                }
                 if !contains_device(&self.active_devices, device.id) {
                     self.active_devices.push(device);
                 }
