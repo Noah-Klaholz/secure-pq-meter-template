@@ -168,10 +168,15 @@ async fn main() -> anyhow::Result<()> {
     // connection is established with the first request.
     let client = Client::new(
         Config::new(endhost_api)
-            // A dummy token. Normally a client asks the AA (the authentication and
-            // authorization service) for a SNAP token; here the AA is left out.
+            // TODO(security): development credential, not a real one. A gateway should ask
+            // the AA (the authentication and authorization service) for a SNAP token that
+            // identifies *this* device, so the network can refuse an unknown one before its
+            // packets reach the application. The dummy token identifies nobody.
             .with_auth_token(snap_tokens::v0::dummy_snap_token())
-            // The server uses a self-signed certificate, so its identity is not verified.
+            // TODO(security): the connection is encrypted but the peer is unauthenticated.
+            // `verify_peer(false)` accepts any certificate, so anything that can answer on
+            // the address can impersonate the receiver and collect the meter data. Pin the
+            // backend certificate, or verify against a CA the gateway is provisioned with.
             .with_quic_config(QuicConfig::builder().verify_peer(false).build()),
     );
 

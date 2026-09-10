@@ -15,6 +15,41 @@ reading the meter, deciding what to send, and how often.
 The challenge itself is described in the
 [challenge description](https://www.energydatahackdays.ch/uploads/secure-power-quality-metering-via-scion/Secure-PQ-Metering-via-SCION.pdf).
 
+## Security status: this is a demonstrator, not a deployment
+
+The name says "secure", and the security this prototype demonstrates is SCION's: readings
+travel over a path-aware network that can move around a failure, and a real deployment can
+refuse an unauthorized sender at the network layer instead of at the application. **The
+authentication around that is stubbed out**, so the prototype should not be pointed at a
+real installation as it stands.
+
+Every shortcut is marked in the code. To see the current list:
+
+```bash
+grep -rn "TODO(security)" crates/
+```
+
+What is stubbed, and what a deployment would need instead:
+
+| Shortcut | Where | What it should be |
+| --- | --- | --- |
+| Dummy SNAP token on the gateway | `pq-meter-client/src/main.rs`, `link.rs` | A token issued to *this* gateway by the AA (authentication and authorization service), so the network refuses an unknown device before its packets reach the application |
+| PocketSCION development token on the receiver | `pq-meter-server/src/main.rs` | A credential issued to the receiver |
+| Gateway does not verify the receiver (`verify_peer(false)`) | `pq-meter-client/src/main.rs` | Pin the backend certificate, or verify against a CA the gateway is provisioned with. The connection is encrypted, but the gateway does not know who is on the other end |
+| Self-signed certificate regenerated on every start | `pq-meter-server/src/api.rs` | A stable certificate the gateway can pin — regenerating it is what forces the gateway to skip verification in the first place |
+| Ingest endpoint is unauthenticated | `pq-meter-server/src/api.rs` | Anything that can reach the SNAP can post readings, and nothing ties a batch to the meter it claims to come from. Reject unauthorized gateways at the network layer, and give the reading an identity the receiver checks |
+| Dashboard has no authentication | `pq-meter-server/src/dashboard/mod.rs` | Bound to `127.0.0.1`, so being on the machine is the only thing protecting it. Exposing it needs authentication and TLS |
+| Modbus TCP to the meter is unauthenticated and unencrypted | `umg605-modbus-client/src/lib.rs` | The protocol offers nothing here, so the meter belongs on an isolated link to the gateway. This segment is the one part of the path SCION does not cover |
+
+Two further properties are by design rather than shortcuts, but are worth knowing:
+
+- The **transport figures the dashboard shows** — path in use, queued readings, latency,
+  failover count — are *reported by the gateway about itself*, because the receiver cannot
+  observe them. They are not evidence. The one thing the receiver does not take on trust is
+  the link state, which it judges from when a batch actually arrived.
+- The **device catalog is a demonstration**, and device inference is a guess from changes in
+  power. It is not metering-grade, and nothing billable should be derived from it.
+
 ## What is in this repository
 
 ```

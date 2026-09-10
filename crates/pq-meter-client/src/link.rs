@@ -50,6 +50,8 @@ impl ScionLink {
     pub async fn attach(endhost_api: Url, server_as: IsdAsn) -> anyhow::Result<Self> {
         let stack = ScionStackBuilder::new()
             .with_endhost_api(endhost_api)
+            // TODO(security): development credential, as in the HTTP/3 client. Both should
+            // use the same real SNAP token once the gateway has one.
             .with_auth_token(snap_tokens::v0::dummy_snap_token())
             .build()
             .await?;

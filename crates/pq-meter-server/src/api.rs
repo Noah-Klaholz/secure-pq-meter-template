@@ -63,6 +63,12 @@ pub(crate) fn router(path: &str, state: AppState) -> Router {
 
 /// Validates the whole request before applying each reading in order. Holding both
 /// locks for the batch prevents other requests from interleaving its measurements.
+///
+/// TODO(security): the endpoint is unauthenticated. Anything that can reach the SNAP can
+/// post readings and move the state this serves, and nothing ties a batch to the meter it
+/// claims to come from. On a real deployment the network layer should reject an
+/// unauthorized gateway before it gets here, and the reading itself should carry an
+/// identity the receiver checks.
 async fn receive(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -156,8 +162,15 @@ fn reading_response(change: DeviceChange, was_first_reading: bool, total_power: 
 /// The client does not verify this certificate. That keeps the setup short, but it means
 /// the connection is encrypted without the client knowing who it talks to. Use a real
 /// certificate before taking anything like this outside of a hackathon.
+///
+/// TODO(security): a certificate regenerated on every start cannot be pinned by anything,
+/// which is what forces the gateway to skip verification. Issue a stable certificate the
+/// gateway is provisioned to expect, then turn its `verify_peer` back on.
 fn quic_config() -> anyhow::Result<squiche::Config> {
     let mut config = QuicConfig::builder()
+        // TODO(security): the receiver does not authenticate gateways either, so it cannot
+        // tell one meter from another. Client certificates would let it, and would pair
+        // with a SNAP token that stops an unknown gateway at the network layer.
         .verify_peer(false)
         .build()
         .to_quiche_config()

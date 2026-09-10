@@ -5,6 +5,12 @@
 //! For more information about the Umg605Pro device, see the [official documentation](https://www.janitza.com/en/products/umg-605-pro/downloads).
 //!
 //! [Modbus register map]: https://assets.janitza.com/ce18jq9ih0x6/b83ae2356a42a682591109/ef2bc2b24a6b7c77de4dbda20e43cebf/janitza-mal-umg605pro-en.pdf
+//!
+//! TODO(security): Modbus TCP has no authentication, integrity protection or encryption of
+//! its own, so anything on the segment between the gateway and the meter can read the
+//! measurements or answer in the meter's place. That segment is the one part of the path
+//! SCION does not cover, and it is why the field device is meant to sit on an isolated link
+//! to the gateway rather than on a shared network.
 
 use std::borrow::Cow;
 use std::net::SocketAddr;

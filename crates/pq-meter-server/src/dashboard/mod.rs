@@ -1,4 +1,9 @@
 //! Local, read-only HTTP dashboard. Assets are embedded so the binary is self-contained.
+//!
+//! TODO(security): the dashboard has no authentication. It is bound to `127.0.0.1` by the
+//! caller, independently of `--bind-ip`, so reaching it means already being on the machine;
+//! that is the only thing protecting it. Exposing it on a network interface needs
+//! authentication and TLS first.
 
 pub mod model;
 
