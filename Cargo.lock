@@ -3103,6 +3103,7 @@ dependencies = [
  "scion-sdk-utils",
  "scion-stack",
  "sciparse",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
