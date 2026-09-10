@@ -1,0 +1,6 @@
+# Everything text is stored with LF in the repository, whatever a working tree checks it
+# out as. The `mixed-line-ending` pre-commit hook and CI enforce the same thing for files
+# that reach git with CRLF already in them.
+* text=auto eol=lf
+
+*.pdf binary

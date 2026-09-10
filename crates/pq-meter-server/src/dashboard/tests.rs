@@ -113,14 +113,16 @@ async fn http_snapshot_is_versioned_read_only_and_uncached() {
 async fn history_returns_oldest_first_dashboard_series() {
     let source = source();
     let mut method = ClosestPowerMatch::new(3.0);
-    source.meter.lock().unwrap().apply_reading(
-        lab_reading(123.0, 240.09, 50.0),
-        &mut method,
-    );
-    source.meter.lock().unwrap().apply_reading(
-        lab_reading(456.0, 239.99, 49.9),
-        &mut method,
-    );
+    source
+        .meter
+        .lock()
+        .unwrap()
+        .apply_reading(lab_reading(123.0, 240.09, 50.0), &mut method);
+    source
+        .meter
+        .lock()
+        .unwrap()
+        .apply_reading(lab_reading(456.0, 239.99, 49.9), &mut method);
 
     let series: HistorySeries = source.history().unwrap();
     assert_eq!(series.schema_version, 1);

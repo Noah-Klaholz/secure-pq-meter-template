@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to a branch makes the run already in flight for it pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Trailing whitespace, LF line endings and the other file-level hooks, run through the
+  # same .pre-commit-config.yaml developers install locally. The Rust hooks are skipped
+  # here: they get their own jobs below, which cache the build.
+  hygiene:
+    name: File hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - run: python -m pip install pre-commit
+      - run: pre-commit run --all-files --show-diff-on-failure --color=always
+        env:
+          SKIP: cargo-fmt,cargo-clippy
+
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # rustup reads rust-toolchain.toml and installs the pinned version with its
+      # rustfmt and clippy components.
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The TLS library in the dependency tree is C code built from source, so the runner
+      # needs cmake and a C/C++ compiler. Both ship with the ubuntu-latest image.
+      - uses: Swatinem/rust-cache@v2.9.2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2.9.2
+      - run: cargo test --workspace

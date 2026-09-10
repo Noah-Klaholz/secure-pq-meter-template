@@ -1,0 +1,57 @@
+# Git hooks, run by the Python `pre-commit` framework (https://pre-commit.com).
+#
+# Install them once per clone with `make hooks`; see the README section "Git hooks and
+# CI". The same hooks run in CI over every file, so a clean commit here is a green
+# pipeline there.
+
+# Without this, a hook that names no stage runs at every one of them, and `git push` would
+# repeat the whole commit-time suite before the tests.
+default_stages: [pre-commit]
+
+repos:
+  # File hygiene: no trailing whitespace, LF line endings only, a newline at the end of
+  # every file.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # These two ask upstream to run on push as well; the split below is the one this
+      # repository wants, so they are pinned back to commit time.
+      - id: trailing-whitespace
+        stages: [pre-commit]
+      - id: end-of-file-fixer
+        stages: [pre-commit]
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+
+  # The Rust hooks call the toolchain pinned in rust-toolchain.toml directly, rather than
+  # letting pre-commit build an environment of its own: that is what `language: system`
+  # means. They check the whole workspace, so they do not take the changed files.
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # The test suite is too slow to sit in front of every commit, so it guards the push
+      # instead. Installed by `pre-commit install --hook-type pre-push`, which `make
+      # hooks` does for you.
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test --workspace
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]

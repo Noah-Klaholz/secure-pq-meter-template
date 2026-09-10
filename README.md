@@ -68,6 +68,8 @@ crates/
     bin/pinger.rs          Example binary that reads values from the meter
 Cargo.toml                 Workspace, pins the SCION SDK version
 rust-toolchain.toml        Rust version used to build this repository
+.pre-commit-config.yaml    Git hooks: formatting, lints, tests and file hygiene
+.github/workflows/ci.yml   The same checks, run on every push and pull request
 ```
 
 The server and client are built on the [SCION endhost SDK](https://github.com/Anapaya/scion-sdk),
@@ -489,7 +491,7 @@ values it carries, and the values in it are consistent with each other. It retur
 phases — voltage, current, real/apparent/reactive power, cos phi, energy and both THD
 figures — together with the three-phase sums the meter measures itself. Values the meter
 cannot determine come back as NaN rather than as an error, so check `is_finite` before using
-one.  
+one.
 
 Which register holds which value is in the [register map of the meter][register-map].
 
@@ -522,6 +524,63 @@ brew install cmake
 
 Rust can also be installed with the same `curl` command as on Linux if you do not use
 Homebrew.
+
+## Git hooks and CI
+
+Every push and pull request runs `.github/workflows/ci.yml`, which checks four things:
+
+| Check | Command |
+| --- | --- |
+| Formatting | `cargo fmt --all --check` |
+| Lints | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
+| Tests | `cargo test --workspace` |
+| File hygiene | `pre-commit run --all-files` — no trailing whitespace, LF line endings only, a newline at the end of every file |
+
+The same checks are available as git hooks, so a commit that would fail CI fails on your
+machine first. They are managed by [pre-commit](https://pre-commit.com/), a Python tool
+that reads `.pre-commit-config.yaml`.
+
+### Installing the hooks
+
+Install `pre-commit` once per machine:
+
+```bash
+pipx install pre-commit          # or: pip install --user pre-commit
+sudo apt install pre-commit      # Debian and Ubuntu
+brew install pre-commit          # macOS
+```
+
+Then install the hooks into your clone:
+
+```bash
+make hooks
+```
+
+That runs `pre-commit install` and `pre-commit install --hook-type pre-push`, which write
+`.git/hooks/pre-commit` and `.git/hooks/pre-push`. Hooks live in `.git/`, so this is per
+clone: everyone who clones the repository runs it once.
+
+### What runs when
+
+* **On `git commit`** — the file hygiene hooks over the staged files, then `cargo fmt
+  --check` and `cargo clippy` over the workspace whenever a `.rs` file is part of the
+  commit. The whitespace and line-ending hooks *fix* what they find and fail the commit;
+  re-stage the corrected files with `git add` and commit again.
+* **On `git push`** — `cargo test --workspace`. The suite is too slow to sit in front of
+  every commit, so it guards the push instead.
+
+Useful commands:
+
+```bash
+pre-commit run --all-files       # check the whole tree, not just staged files
+make lint                        # cargo fmt --check and clippy, without the hooks
+git commit --no-verify           # skip the hooks for one commit
+pre-commit autoupdate            # bump the pinned hook versions in the config
+```
+
+Line endings have a second guard: `.gitattributes` sets `* text=auto eol=lf`, so git
+stores LF whatever your working tree checks out as. The `mixed-line-ending` hook catches
+files that reach git with CRLF in them anyway.
 
 ## Bootstrapping the SD card for the Raspberry Pi 5
 

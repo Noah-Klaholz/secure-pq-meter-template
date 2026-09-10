@@ -1,4 +1,20 @@
-.PHONY: test run-server stop-server restart-server run-client client stop-client kill-client build-client-local build-client deploy-client build-pinger deploy-pinger
+.PHONY: hooks lint test run-server stop-server restart-server run-client client stop-client kill-client build-client-local build-client deploy-client build-pinger deploy-pinger
+
+# Installs the git hooks from .pre-commit-config.yaml. Needs the `pre-commit` tool:
+# `pipx install pre-commit`, or your distribution's package.
+hooks:
+	@command -v pre-commit >/dev/null 2>&1 || { \
+		echo "pre-commit is not installed. See the README section 'Git hooks and CI'."; \
+		exit 1; \
+	}
+	pre-commit install
+	pre-commit install --hook-type pre-push
+	@echo "Hooks installed. Run them over the whole tree with: pre-commit run --all-files"
+
+# The checks CI runs, minus the test suite.
+lint:
+	cargo fmt --all --check
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 test:
 	cargo test --workspace
