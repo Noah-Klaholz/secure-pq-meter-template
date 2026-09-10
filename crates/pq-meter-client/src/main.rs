@@ -199,6 +199,9 @@ async fn monitor(
         let read_elapsed = start.elapsed();
 
         let measurement = serde_json::json!({
+            // The server's decision logic reads this one. The rest is context it ignores
+            // today but can grow into.
+            "total_power": real_power_l1,
             "systime": systime,
             "frequency_hz": frequency,
             "l1": {
