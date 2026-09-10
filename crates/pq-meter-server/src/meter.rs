@@ -26,7 +26,6 @@ pub struct MeterState {
     readings_received: u64,
     last_received_at: Option<DateTime<Utc>>,
     last_change: Option<(DeviceChange, DateTime<Utc>)>,
-    /// Accepted readings of the last [`HISTORY_WINDOW`], oldest first.
     history: History<MeterReading>,
     /// What the gateway last reported about the link it delivers over.
     transport: GatewayTransport,
@@ -124,7 +123,7 @@ impl MeterState {
             self.last_change = Some((change, now));
         }
         self.latest_reading = Some(reading);
-        self.history.push(reading, SystemTime::now());
+        self.history.push(reading, SystemTime::from(now));
         self.readings_received += 1;
         self.last_received_at = Some(now);
         change

@@ -110,6 +110,49 @@ async fn http_snapshot_is_versioned_read_only_and_uncached() {
 }
 
 #[tokio::test]
+async fn history_returns_oldest_first_dashboard_series() {
+    let source = source();
+    let mut method = ClosestPowerMatch::new(3.0);
+    source.meter.lock().unwrap().apply_reading(
+        lab_reading(123.0, 240.09, 50.0),
+        &mut method,
+    );
+    source.meter.lock().unwrap().apply_reading(
+        lab_reading(456.0, 239.99, 49.9),
+        &mut method,
+    );
+
+    let series: HistorySeries = source.history().unwrap();
+    assert_eq!(series.schema_version, 1);
+    assert!(series.window_seconds > 0);
+    assert_eq!(series.samples.len(), 2);
+    assert_eq!(series.samples[0].total_power_watts, 123.0);
+    assert_eq!(series.samples[0].frequency_hz, Some(50.0));
+    assert_eq!(series.samples[0].voltage_v[0], Some(240.09));
+    assert_eq!(series.samples[0].current_a[0], Some(2.0));
+    assert_eq!(series.samples[0].thd_voltage_pct[0], Some(1.9));
+    assert_eq!(series.samples[0].thd_current_pct[0], Some(3.0));
+    assert_eq!(series.samples[1].total_power_watts, 456.0);
+    assert_eq!(series.samples[1].voltage_v[0], Some(239.99));
+
+    let response = router(source)
+        .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert!(value["window_seconds"].as_u64().unwrap() > 0);
+    let samples = value["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0]["total_power_watts"], 123.0);
+    assert_eq!(samples[0]["frequency_hz"], 50.0);
+    assert_eq!(samples[0]["voltage_v"][0], 240.09);
+    assert_eq!(samples[0]["current_a"][0], 2.0);
+}
+
+#[tokio::test]
 async fn assets_have_correct_types_and_unknown_paths_return_not_found() {
     let app = router(source());
     for (path, content_type) in [
