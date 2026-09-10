@@ -27,4 +27,9 @@ impl<T> History<T> {
     pub fn all(&self) -> &[HistoryEntry<T>] {
         &self.entries
     }
+
+    pub fn recent(&self, n: usize) -> &[HistoryEntry<T>] {
+        let start = self.entries.len().saturating_sub(n);
+        &self.entries[start..]
+    }
 }
