@@ -6,7 +6,7 @@
 use chrono::Utc;
 use serde::Serialize;
 
-use crate::{decision::DeviceChange, meter::SharedMeterState};
+use crate::{decision::DeviceChange, input::MeterReading, meter::SharedMeterState};
 
 pub trait SnapshotSource: Send + Sync {
     fn snapshot(&self) -> Result<Snapshot, &'static str>;
@@ -26,6 +26,7 @@ pub struct Snapshot {
     pub readings_received: u64,
     pub last_received_at: Option<String>,
     pub total_power_watts: Option<f32>,
+    pub latest_reading: Option<MeterReading>,
     pub inferred_power_watts: f64,
     pub devices: Vec<DeviceStatus>,
     pub last_change: Option<Change>,
@@ -63,6 +64,7 @@ impl SnapshotSource for LiveMeterSource {
             readings_received: meter.readings_received,
             last_received_at: meter.last_received_at.map(|time| time.to_rfc3339()),
             total_power_watts: meter.total_power_watts,
+            latest_reading: meter.latest_reading,
             inferred_power_watts: meter
                 .active_devices
                 .iter()

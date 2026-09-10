@@ -27,6 +27,7 @@ fn snapshot_tracks_baseline_addition_removal_and_preserves_last_change() {
     let source = source();
     let empty = source.snapshot().unwrap();
     assert_eq!(empty.total_power_watts, None);
+    assert_eq!(empty.latest_reading, None);
     assert_eq!(empty.last_received_at, None);
     assert_eq!(empty.readings_received, 0);
     assert!(empty.devices.iter().all(|device| !device.active));
@@ -36,7 +37,7 @@ fn snapshot_tracks_baseline_addition_removal_and_preserves_last_change() {
         .meter
         .lock()
         .unwrap()
-        .apply_reading(100.0, &mut method);
+        .apply_reading(100.0.into(), &mut method);
     let baseline = source.snapshot().unwrap();
     assert_eq!(baseline.total_power_watts, Some(100.0));
     assert!(baseline.last_received_at.is_some());
@@ -46,7 +47,7 @@ fn snapshot_tracks_baseline_addition_removal_and_preserves_last_change() {
         .meter
         .lock()
         .unwrap()
-        .apply_reading(123.0, &mut method);
+        .apply_reading(123.0.into(), &mut method);
     let added = source.snapshot().unwrap();
     assert!(added.devices[0].active);
     assert_eq!(added.inferred_power_watts, 23.0);
@@ -55,7 +56,7 @@ fn snapshot_tracks_baseline_addition_removal_and_preserves_last_change() {
         .meter
         .lock()
         .unwrap()
-        .apply_reading(123.0, &mut method);
+        .apply_reading(123.0.into(), &mut method);
     assert_eq!(
         source.snapshot().unwrap().last_change.unwrap().received_at,
         added_at
@@ -65,7 +66,7 @@ fn snapshot_tracks_baseline_addition_removal_and_preserves_last_change() {
         .meter
         .lock()
         .unwrap()
-        .apply_reading(100.0, &mut method);
+        .apply_reading(100.0.into(), &mut method);
     let removed = source.snapshot().unwrap();
     assert_eq!(removed.readings_received, 4);
     assert!(!removed.devices[0].active);
@@ -91,6 +92,7 @@ async fn http_snapshot_is_versioned_read_only_and_uncached() {
         serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
     assert_eq!(value["schema_version"], 1);
     assert_eq!(value["total_power_watts"], serde_json::Value::Null);
+    assert_eq!(value["latest_reading"], serde_json::Value::Null);
     assert_eq!(
         value["devices"].as_array().unwrap().len(),
         DUMMY_DEVICE_CATALOG.len()
