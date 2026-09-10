@@ -99,6 +99,18 @@ impl Umg605ProClient {
         };
         Ok(f32::from_bits(((hi as u32) << 16) | (lo as u32)))
     }
+
+    /// Reads an i32 value spanning the two holding registers starting at `addr`.
+    pub async fn read_i32(&mut self, addr: u16) -> Result<i32, ReadError> {
+        let regs = self.read_holding_registers(addr, 2).await?;
+        let [hi, lo] = regs[..] else {
+            return Err(ReadError::DecodeError(Cow::Owned(format!(
+                "expected 2 registers at {addr}, got {}",
+                regs.len()
+            ))));
+        };
+        Ok((((hi as u32) << 16) | (lo as u32)) as i32)
+    }
 }
 
 
@@ -116,6 +128,11 @@ impl Umg605ProClient {
 
     pub async fn real_power_l1(&mut self) -> Result<f32, ReadError> {
         self.read_f32(19020).await
+    }
+
+    /// Alias for real_power_l1
+    pub async fn power_l1_n(&mut self) -> Result<f32, ReadError> {
+        self.real_power_l1().await
     }
 
     pub async fn apparent_power_l1(&mut self) -> Result<f32, ReadError> {
