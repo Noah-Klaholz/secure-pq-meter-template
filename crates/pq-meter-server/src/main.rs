@@ -61,18 +61,27 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("building the SCION stack of the server")?;
     let addr_str = format!("[{},{}]:60000", network::SERVER_AS, args.bind_ip);
-    let bind_addr: sciparse::address::ip_socket_addr::ScionSocketIpAddr = addr_str.parse().context("parsing bind address")?;
-    
+    let bind_addr: sciparse::address::ip_socket_addr::ScionSocketIpAddr =
+        addr_str.parse().context("parsing bind address")?;
+
     let socket = stack
         .bind(Some(bind_addr))
         .await
         .context("opening a SCION socket for the server")?;
     let server_address = socket.local_addr();
 
+    // The catalog and decision method are intentionally supplied independently. Edit the
+    // table in `api.rs`, or replace `ClosestPowerMatch` with another `DecisionMethod`.
+    let meter = Arc::new(std::sync::Mutex::new(api::MeterState::new(
+        api::DUMMY_DEVICE_CATALOG.to_vec(),
+    )));
+    let decision_method: api::SharedDecisionMethod = Arc::new(api::ClosestPowerMatch::new(40.0));
+
     println!("SCION network is up");
     println!("  gateway endhost API: {}", network.gateway_endhost_api);
     println!("  HTTP/3 server:       {server_address}");
     println!("  accepting POST on:   {}", args.path);
+    println!(r#"  expected JSON:       {{"total_power": 860.0}}"#);
     println!();
     println!("Start the client with:");
     println!("  pq-meter-client --server {}", args.bind_ip);
@@ -81,6 +90,8 @@ async fn main() -> anyhow::Result<()> {
     api::serve(
         Arc::new(socket) as Arc<dyn GenericScionUdpSocket>,
         &args.path,
+        meter,
+        decision_method,
     )
     .await
 }
