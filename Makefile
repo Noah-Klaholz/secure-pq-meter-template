@@ -69,23 +69,49 @@ build-client-local:
 	@echo "Building client for the local machine..."
 	cargo build -p pq-meter-client
 
+# Cross compilation. `cross` runs the build in a container and needs Docker or Podman;
+# without it, fall back to the host toolchain, which needs an aarch64 GCC and binutils
+# (Debian/Ubuntu: gcc-aarch64-linux-gnu, Arch: aarch64-linux-gnu-gcc) plus the Rust std
+# for the target. cc-rs looks for `aarch64-linux-gnu-ar`, which some distributions do not
+# ship, so point it at llvm-ar when that is the case.
+AARCH64_ENV := \
+	CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+	CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+	CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
+	AR_aarch64_unknown_linux_gnu=$(shell command -v aarch64-linux-gnu-ar 2>/dev/null || command -v llvm-ar) \
+	RANLIB_aarch64_unknown_linux_gnu=$(shell command -v aarch64-linux-gnu-ranlib 2>/dev/null || command -v llvm-ranlib)
+
 build-client:
 	@echo "Cross-compiling client for Raspberry Pi (aarch64)..."
-	cargo cross build --release -p pq-meter-client --target aarch64-unknown-linux-gnu
+	@if command -v cross >/dev/null 2>&1; then \
+		cross build --release -p pq-meter-client --target aarch64-unknown-linux-gnu; \
+	else \
+		echo "'cross' not installed; building with the host toolchain."; \
+		$(AARCH64_ENV) cargo build --release -p pq-meter-client --target aarch64-unknown-linux-gnu; \
+	fi
 
+# Copies next to the old binary and moves it into place: writing straight over the file
+# fails while a client is still running from it, and the move leaves that process alone.
 deploy-client: build-client
 	@echo "Copying client binary to $(PI_USER)@$(PI_HOST):$(PI_DEST) ..."
 	@if [ -n "$(PI_PASS)" ] && command -v sshpass >/dev/null 2>&1; then \
-		sshpass -p '$(PI_PASS)' scp target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST); \
+		sshpass -p '$(PI_PASS)' scp target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST)/pq-meter-client.new && \
+		sshpass -p '$(PI_PASS)' ssh $(PI_USER)@$(PI_HOST) "chmod +x $(PI_DEST)/pq-meter-client.new && mv $(PI_DEST)/pq-meter-client.new $(PI_DEST)/pq-meter-client"; \
 	else \
 		if [ -n "$(PI_PASS)" ]; then echo "Warning: PI_PASS is set but 'sshpass' is not installed. Asking interactively..."; fi; \
-		scp target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST); \
+		scp target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST)/pq-meter-client.new && \
+		ssh $(PI_USER)@$(PI_HOST) "chmod +x $(PI_DEST)/pq-meter-client.new && mv $(PI_DEST)/pq-meter-client.new $(PI_DEST)/pq-meter-client"; \
 	fi
-	@echo "should be done"
+	@echo "Deployed. Restart the client to pick it up: make run-client"
 
 build-pinger:
 	@echo "Cross-compiling pinger for Raspberry Pi (aarch64)..."
-	cargo cross build --release -p umg605-modbus-client --bin pinger --target aarch64-unknown-linux-gnu
+	@if command -v cross >/dev/null 2>&1; then \
+		cross build --release -p umg605-modbus-client --bin pinger --target aarch64-unknown-linux-gnu; \
+	else \
+		echo "'cross' not installed; building with the host toolchain."; \
+		$(AARCH64_ENV) cargo build --release -p umg605-modbus-client --bin pinger --target aarch64-unknown-linux-gnu; \
+	fi
 
 deploy-pinger: build-pinger
 	@echo "Copying pinger binary to $(PI_USER)@$(PI_HOST):$(PI_DEST) ..."

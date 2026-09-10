@@ -498,6 +498,11 @@ The Pi is slow at compiling, so build on your laptop and copy the binary over. T
 `aarch64-unknown-linux-gnu`. We use [`cargo-cross`](https://github.com/zijiren233/cargo-cross),
 which downloads the needed toolchain itself and needs no container engine.
 
+The gateway and the receiver share the measurement schema, so **deploy them together**. A
+gateway one version behind is rejected with a message naming the field it is missing, for
+example `reading 1: missing field \`thd_voltage_pct\``; rebuild and redeploy the client
+when that appears.
+
 ### Install cargo-cross
 
 Same on Linux and macOS:
@@ -505,6 +510,10 @@ Same on Linux and macOS:
 ```bash
 cargo install cargo-cross
 ```
+
+`cross` runs the build in a container and needs Docker or Podman. Without it, `make
+build-client` falls back to the host toolchain, which needs an aarch64 GCC and the Rust
+std for the target (Debian/Ubuntu: `gcc-aarch64-linux-gnu`, Arch: `aarch64-linux-gnu-gcc`).
 
 ### Build the client
 
