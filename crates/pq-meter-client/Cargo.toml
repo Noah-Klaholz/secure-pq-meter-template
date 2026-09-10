@@ -16,4 +16,5 @@ serde_json = { workspace = true }
 snap-tokens = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
+umg605-modbus-client = { workspace = true }
 url = { workspace = true }
