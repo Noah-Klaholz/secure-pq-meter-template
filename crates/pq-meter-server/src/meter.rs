@@ -1,11 +1,14 @@
 //! Transport-independent, in-memory state. Only accepted readings update this store.
 
-use std::sync::{Arc, Mutex};
+use std::{sync::{Arc, Mutex}, time::SystemTime};
 
 use chrono::{DateTime, Utc};
 
-use crate::decision::{DecisionMethod, Device, DeviceChange, contains_device};
-use crate::input::MeterReading;
+use crate::{
+    decision::{DecisionMethod, Device, DeviceChange, contains_device},
+    history::History,
+    input::MeterReading,
+};
 
 pub type SharedMeterState = Arc<Mutex<MeterState>>;
 
@@ -13,6 +16,7 @@ pub struct MeterState {
     catalog: Vec<Device>,
     active_devices: Vec<Device>,
     latest_reading: Option<MeterReading>,
+    history: History<MeterReading>,
     readings_received: u64,
     last_received_at: Option<DateTime<Utc>>,
     last_change: Option<(DeviceChange, DateTime<Utc>)>,
@@ -35,6 +39,7 @@ impl MeterState {
             catalog,
             active_devices: Vec::new(),
             latest_reading: None,
+            history: History::new(),
             readings_received: 0,
             last_received_at: None,
             last_change: None,
@@ -84,6 +89,7 @@ impl MeterState {
             self.last_change = Some((change, now));
         }
         self.latest_reading = Some(reading);
+        self.history.push(reading, SystemTime::from(now));
         self.readings_received += 1;
         self.last_received_at = Some(now);
         change
