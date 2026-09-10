@@ -19,4 +19,12 @@ impl<T> History<T> {
     pub fn push(&mut self, data: T, timestamp: SystemTime) {
         self.entries.push(HistoryEntry { timestamp, data });
     }
+
+    pub fn latest(&self) -> Option<&HistoryEntry<T>> {
+        self.entries.last()
+    }
+
+    pub fn all(&self) -> &[HistoryEntry<T>] {
+        &self.entries
+    }
 }
