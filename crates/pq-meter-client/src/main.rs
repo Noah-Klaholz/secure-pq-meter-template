@@ -72,10 +72,6 @@ struct Args {
     #[arg(long, default_value = "/edh/v1/hello")]
     path: String,
 
-    /// Message to send.
-    #[arg(long, default_value = "Hello from Energy Data Hackdays 2026")]
-    message: String,
-
     /// The IP address of the Umg605Pro device.
     #[arg(long, visible_alias = "ip", default_value = "10.10.0.2")]
     meter_ip: IpAddr,
@@ -108,20 +104,21 @@ async fn main() -> anyhow::Result<()> {
         .or(args.server_pos)
         .ok_or_else(|| anyhow::anyhow!("server IP address must be supplied (e.g. `pq-meter-client 192.168.1.42` or `--server 192.168.1.42`)"))?;
 
-    let (server_scion, server_ip): (ScionSocketIpAddr, IpAddr) =
-        if let Ok(ip) = server_raw.parse::<IpAddr>() {
-            let scion_addr: ScionSocketIpAddr = format!("[{SERVER_AS},{ip}]:{SERVER_PORT}")
-                .parse()
-                .context("constructing SCION address from server IP")?;
-            (scion_addr, ip)
-        } else if let Ok(scion_addr) = server_raw.parse::<ScionSocketIpAddr>() {
-            let ip = scion_addr.ip();
-            (scion_addr, ip)
-        } else {
-            anyhow::bail!(
-                "invalid server address: expected an IP address (e.g. 192.168.1.42) or SCION address, got '{server_raw}'"
-            );
-        };
+    let (server_scion, server_ip): (ScionSocketIpAddr, IpAddr) = if let Ok(ip) =
+        server_raw.parse::<IpAddr>()
+    {
+        let scion_addr: ScionSocketIpAddr = format!("[{SERVER_AS},{ip}]:{SERVER_PORT}")
+            .parse()
+            .context("constructing SCION address from server IP")?;
+        (scion_addr, ip)
+    } else if let Ok(scion_addr) = server_raw.parse::<ScionSocketIpAddr>() {
+        let ip = scion_addr.ip();
+        (scion_addr, ip)
+    } else {
+        anyhow::bail!(
+            "invalid server address: expected an IP address (e.g. 192.168.1.42) or SCION address, got '{server_raw}'"
+        );
+    };
 
     let endhost_api = match args.endhost_api {
         Some(url) => url,
@@ -144,78 +141,123 @@ async fn main() -> anyhow::Result<()> {
             .with_quic_config(QuicConfig::builder().verify_peer(false).build()),
     );
 
-    let body = serde_json::to_vec(&serde_json::json!({ "message": args.message }))
-        .context("encoding the message")?;
-
-    // The URL holds the server name and the port. `target` gives the SCION address the
-    // packets go to, so the simulated network needs no DNS.
-    let url = format!("https://{SERVER_NAME}:{}{}", server_scion.port(), args.path);
-    let request = Request::post(&url)
-        .header("content-type", "application/json")
-        .target(server_scion.host())
-        .body(body)
-        .build()
-        .context("building the request")?;
-
-    println!("sending to {server_scion}{} ...", args.path);
-
-    let response = client
-        .request(request)
-        .await
-        .context("sending the request")?;
-    let status = response.status();
-    let (body, _trailers) = response
-        .text(Some(MAX_BODY_SIZE))
-        .await
-        .context("reading the response")?;
-
-    println!("server answered {status}: {body}");
-
-    client.close().await;
-
-    anyhow::ensure!(status.is_success(), "server answered with {status}");
-
     let meter_socket_addr = SocketAddr::new(args.meter_ip, args.meter_port);
     let meter_timeout = Duration::from_secs(args.meter_timeout);
     let mut meter_client =
         Umg605ProClient::connect_tcp(meter_socket_addr, Slave(args.meter_unit), meter_timeout)
             .await?;
 
-    monitor(&mut meter_client, METER_INTERVAL).await?;
+    println!("streaming meter data to {server_scion}{} ...", args.path);
+
+    monitor(
+        &mut meter_client,
+        &client,
+        &server_scion,
+        &args.path,
+        METER_INTERVAL,
+    )
+    .await?;
+
+    client.close().await;
 
     Ok(())
 }
 
-async fn monitor(client: &mut Umg605ProClient, period: Duration) -> anyhow::Result<()> {
+/// Reads the meter every `period` and pushes each reading to the server over SCION.
+///
+/// `http` is reused across ticks, so only the first request pays for the QUIC handshake.
+/// A failed request is reported and the loop continues: a gateway that gives up on the
+/// first network hiccup is of no use in the field.
+async fn monitor(
+    meter: &mut Umg605ProClient,
+    http: &Client,
+    server: &ScionSocketIpAddr,
+    path: &str,
+    period: Duration,
+) -> anyhow::Result<()> {
+    // The URL holds the server name and the port. `target` gives the SCION address the
+    // packets go to, so the simulated network needs no DNS.
+    let url = format!("https://{SERVER_NAME}:{}{}", server.port(), path);
+
     let mut interval = tokio::time::interval(period);
     loop {
         interval.tick().await;
         let start = Instant::now();
-        
-        let systime = client.systime().await?;
-        let frequency = client.frequency().await?;
-        
-        let voltage_l1 = client.voltage_l1().await?;
-        let current_l1 = client.current_l1().await?;
-        let real_power_l1 = client.real_power_l1().await?;
-        let apparent_power_l1 = client.apparent_power_l1().await?;
-        let reactive_power_l1 = client.reactive_power_l1().await?;
-        let cos_phi_l1 = client.cos_phi_l1().await?;
-        let real_energy_consumed_l1 = client.real_energy_consumed_l1().await?;
-        let thd_current_l1 = client.thd_current_l1().await?;
-        
+
+        let systime = meter.systime().await?;
+        let frequency = meter.frequency().await?;
+
+        let voltage_l1 = meter.voltage_l1().await?;
+        let current_l1 = meter.current_l1().await?;
+        let real_power_l1 = meter.real_power_l1().await?;
+        let apparent_power_l1 = meter.apparent_power_l1().await?;
+        let reactive_power_l1 = meter.reactive_power_l1().await?;
+        let cos_phi_l1 = meter.cos_phi_l1().await?;
+        let real_energy_consumed_l1 = meter.real_energy_consumed_l1().await?;
+        let thd_current_l1 = meter.thd_current_l1().await?;
+
+        let read_elapsed = start.elapsed();
+
+        let measurement = serde_json::json!({
+            "systime": systime,
+            "frequency_hz": frequency,
+            "l1": {
+                "voltage_v": voltage_l1,
+                "current_a": current_l1,
+                "real_power_w": real_power_l1,
+                "apparent_power_va": apparent_power_l1,
+                "reactive_power_var": reactive_power_l1,
+                "cos_phi": cos_phi_l1,
+                "real_energy_consumed_wh": real_energy_consumed_l1,
+                "thd_current_pct": thd_current_l1,
+            }
+        });
+        let body = serde_json::to_vec(&measurement).context("encoding the measurement")?;
+
+        let request = Request::post(&url)
+            .header("content-type", "application/json")
+            .target(server.host())
+            .body(body)
+            .build()
+            .context("building the request")?;
+
+        match http.request(request).await {
+            Ok(response) => {
+                let status = response.status();
+                if !status.is_success() {
+                    eprintln!("Warning: server answered with {status}");
+                }
+                // The body is drained even when it is not used, so the stream is closed
+                // and the connection can be reused by the next tick.
+                let _ = response.text(Some(MAX_BODY_SIZE)).await;
+            }
+            Err(error) => eprintln!("Warning: sending the measurement failed: {error}"),
+        }
+
         let total_elapsed = start.elapsed();
 
         if total_elapsed > period {
             eprintln!(
-                "Warning: Reading values took longer than the {:.2?} interval: {:.2?}",
-                period, total_elapsed
+                "Warning: Reading and sending took longer than the {:.2?} interval: {:.2?} read + {:.2?} send = {:.2?}",
+                period,
+                read_elapsed,
+                total_elapsed - read_elapsed,
+                total_elapsed
             );
         }
 
         println!(
             "Time: {} | Freq: {:.2}Hz | L1 [U: {:.2}V, I: {:.2}A, P: {:.2}W, S: {:.2}VA, Q: {:.2}var, PF: {:.2}, Energy: {:.2}Wh, THD_I: {:.2}%]",
-            systime, frequency, voltage_l1, current_l1, real_power_l1, apparent_power_l1, reactive_power_l1, cos_phi_l1, real_energy_consumed_l1, thd_current_l1
+            systime,
+            frequency,
+            voltage_l1,
+            current_l1,
+            real_power_l1,
+            apparent_power_l1,
+            reactive_power_l1,
+            cos_phi_l1,
+            real_energy_consumed_l1,
+            thd_current_l1
         );
     }
 }
