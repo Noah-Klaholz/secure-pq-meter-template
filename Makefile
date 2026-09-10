@@ -10,10 +10,12 @@ else
 	WLAN_IP := $(shell ip -o -4 addr list 2>/dev/null | awk '$$2 ~ /^wl/ {print $$4}' | cut -d/ -f1 | head -n1)
 endif
 
-# Raspberry Pi deployment configuration (override via command line: make deploy-client PI_USER=myuser PI_HOST=192.168.1.10)
 PI_USER ?= anapaya
 PI_HOST ?= 10.175.8.48
 PI_DEST ?= /home/anapaya
+
+# This is not a good idea but I don't wanna do it with ssh key right now XD
+PI_PASS ?= anapaya
 
 run-server:
 	@if [ -z "$(WLAN_IP)" ]; then \
@@ -29,7 +31,13 @@ build-client:
 
 deploy-client: build-client
 	@echo "Copying client binary to $(PI_USER)@$(PI_HOST):$(PI_DEST) ..."
-	scp target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST)
+	@if [ -n "$(PI_PASS)" ] && command -v sshpass >/dev/null 2>&1; then \
+		sshpass -p '$(PI_PASS)' scp target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST); \
+	else \
+		if [ -n "$(PI_PASS)" ]; then echo "Warning: PI_PASS is set but 'sshpass' is not installed. Asking interactively..."; fi; \
+		scp target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST); \
+	fi
+	@echo "should be done"
 
 build-pinger:
 	@echo "Cross-compiling pinger for Raspberry Pi (aarch64)..."
@@ -37,4 +45,9 @@ build-pinger:
 
 deploy-pinger: build-pinger
 	@echo "Copying pinger binary to $(PI_USER)@$(PI_HOST):$(PI_DEST) ..."
-	scp target/aarch64-unknown-linux-gnu/release/pinger $(PI_USER)@$(PI_HOST):$(PI_DEST)
+	@if [ -n "$(PI_PASS)" ] && command -v sshpass >/dev/null 2>&1; then \
+		sshpass -p '$(PI_PASS)' scp target/aarch64-unknown-linux-gnu/release/pinger $(PI_USER)@$(PI_HOST):$(PI_DEST); \
+	else \
+		if [ -n "$(PI_PASS)" ]; then echo "Warning: PI_PASS is set but 'sshpass' is not installed. Asking interactively..."; fi; \
+		scp target/aarch64-unknown-linux-gnu/release/pinger $(PI_USER)@$(PI_HOST):$(PI_DEST); \
+	fi
