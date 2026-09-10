@@ -60,8 +60,11 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .await
         .context("building the SCION stack of the server")?;
+    let addr_str = format!("[{},{}]:60000", network::SERVER_AS, args.bind_ip);
+    let bind_addr: sciparse::address::ip_socket_addr::ScionSocketIpAddr = addr_str.parse().context("parsing bind address")?;
+    
     let socket = stack
-        .bind(None)
+        .bind(Some(bind_addr))
         .await
         .context("opening a SCION socket for the server")?;
     let server_address = socket.local_addr();
