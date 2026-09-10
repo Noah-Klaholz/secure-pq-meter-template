@@ -615,3 +615,224 @@ h3 {
     flex-shrink:0;
   }
 }
+
+/* ---- Power-quality view ------------------------------------------------- */
+
+.wide-panel {
+  margin-bottom:24px;
+}
+
+.numeric {
+  text-align:right;
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+}
+
+/* A quantity the meter could not determine, kept visibly apart from a measured zero. */
+.unavailable {
+  color:#9aa8a1;
+  font-style:italic;
+}
+
+/* Outside its limit. */
+td.breach {
+  color:#a04942;
+  background:#fbeae7;
+  font-weight:600;
+}
+
+/* Inside the limit but worth watching. */
+td.watch {
+  color:#936515;
+  background:#fff7e6;
+  font-weight:600;
+}
+
+.breach-text {
+  color:#a04942;
+}
+
+.watch-text {
+  color:#936515;
+}
+
+.idle-phase td {
+  color:#8c9a93;
+}
+
+.idle-phase td:first-child {
+  color:#24332f;
+}
+
+.dash-key {
+  font-style:italic;
+}
+
+.chart-grid {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:24px;
+  margin-bottom:24px;
+}
+
+.chart-panel .panel-heading {
+  padding:16px 18px;
+}
+
+.chart-body {
+  padding:14px 18px 6px;
+  display:flex;
+  gap:10px;
+  align-items:stretch;
+}
+
+.chart {
+  flex:1;
+  height:86px;
+  width:100%;
+  min-width:0;
+  overflow:visible;
+}
+
+.chart-band {
+  fill:#e7f4ec;
+}
+
+.chart-line {
+  fill:none;
+  stroke-width:1.4;
+  vector-effect:non-scaling-stroke;
+  stroke-linejoin:round;
+  stroke-linecap:round;
+}
+
+.chart-line.l1, .chart-line.power {
+  stroke:#17634c;
+}
+
+.chart-line.l2 {
+  stroke:#c2803a;
+}
+
+.chart-line.l3 {
+  stroke:#4a6fa5;
+}
+
+.chart-empty-line {
+  stroke:#dfe6e2;
+  stroke-width:1;
+  stroke-dasharray:3 3;
+  vector-effect:non-scaling-stroke;
+}
+
+.chart-scale {
+  display:flex;
+  flex-direction:column;
+  justify-content:space-between;
+  font-size:10px;
+  color:var(--muted);
+  font-variant-numeric:tabular-nums;
+  text-align:right;
+  min-width:52px;
+}
+
+.chart-legend {
+  margin:0;
+  padding:0 18px 14px;
+  display:flex;
+  gap:14px;
+  font-size:11px;
+  color:var(--muted);
+}
+
+.key {
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+}
+
+.key:before {
+  content:"";
+  width:12px;
+  height:2px;
+  border-radius:2px;
+  background:currentColor;
+}
+
+.key.l1 {
+  color:#17634c;
+}
+
+.key.l2 {
+  color:#c2803a;
+}
+
+.key.l3 {
+  color:#4a6fa5;
+}
+
+.event-list {
+  list-style:none;
+  margin:0;
+  padding:8px 0;
+  max-height:260px;
+  overflow-y:auto;
+}
+
+.event-list li {
+  display:flex;
+  gap:11px;
+  align-items:flex-start;
+  padding:11px 22px;
+  font-size:12px;
+  line-height:1.5;
+  border-bottom:1px solid #f0f3f1;
+}
+
+.event-list li:last-child {
+  border-bottom:none;
+}
+
+.event-list li.empty {
+  color:var(--muted);
+  justify-content:flex-start;
+}
+
+.event-tag {
+  font-size:9.5px;
+  font-weight:700;
+  letter-spacing:.06em;
+  border-radius:4px;
+  padding:3px 6px;
+  flex-shrink:0;
+  margin-top:1px;
+}
+
+.event-list li.breach .event-tag {
+  color:#a04942;
+  background:#fbeae7;
+}
+
+.event-list li.watch .event-tag {
+  color:#936515;
+  background:#fff3d8;
+}
+
+/* A SCION path is long; let it wrap rather than stretch the panel. */
+.path-value {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;
+  line-height:1.5;
+  overflow-wrap:anywhere;
+  text-align:right;
+}
+
+.secondary-grid {
+  margin-top:24px;
+}
+
+@media (max-width:1100px) {
+  .chart-grid {
+    grid-template-columns:1fr;
+  }
+}

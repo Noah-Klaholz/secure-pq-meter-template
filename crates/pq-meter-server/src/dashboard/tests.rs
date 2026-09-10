@@ -7,7 +7,7 @@ use axum::{
 use tower::ServiceExt;
 
 use super::{
-    model::{LiveMeterSource, Snapshot},
+    model::{HistorySeries, LiveMeterSource, Snapshot},
     *,
 };
 use crate::{
@@ -110,6 +110,49 @@ async fn http_snapshot_is_versioned_read_only_and_uncached() {
 }
 
 #[tokio::test]
+async fn history_returns_oldest_first_dashboard_series() {
+    let source = source();
+    let mut method = ClosestPowerMatch::new(3.0);
+    source.meter.lock().unwrap().apply_reading(
+        lab_reading(123.0, 240.09, 50.0),
+        &mut method,
+    );
+    source.meter.lock().unwrap().apply_reading(
+        lab_reading(456.0, 239.99, 49.9),
+        &mut method,
+    );
+
+    let series: HistorySeries = source.history().unwrap();
+    assert_eq!(series.schema_version, 1);
+    assert!(series.window_seconds > 0);
+    assert_eq!(series.samples.len(), 2);
+    assert_eq!(series.samples[0].total_power_watts, 123.0);
+    assert_eq!(series.samples[0].frequency_hz, Some(50.0));
+    assert_eq!(series.samples[0].voltage_v[0], Some(240.09));
+    assert_eq!(series.samples[0].current_a[0], Some(2.0));
+    assert_eq!(series.samples[0].thd_voltage_pct[0], Some(1.9));
+    assert_eq!(series.samples[0].thd_current_pct[0], Some(3.0));
+    assert_eq!(series.samples[1].total_power_watts, 456.0);
+    assert_eq!(series.samples[1].voltage_v[0], Some(239.99));
+
+    let response = router(source)
+        .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert!(value["window_seconds"].as_u64().unwrap() > 0);
+    let samples = value["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0]["total_power_watts"], 123.0);
+    assert_eq!(samples[0]["frequency_hz"], 50.0);
+    assert_eq!(samples[0]["voltage_v"][0], 240.09);
+    assert_eq!(samples[0]["current_a"][0], 2.0);
+}
+
+#[tokio::test]
 async fn assets_have_correct_types_and_unknown_paths_return_not_found() {
     let app = router(source());
     for (path, content_type) in [
@@ -118,6 +161,7 @@ async fn assets_have_correct_types_and_unknown_paths_return_not_found() {
         ("/assets/app.js", "text/javascript; charset=utf-8"),
         ("/assets/api.js", "text/javascript; charset=utf-8"),
         ("/assets/overview.js", "text/javascript; charset=utf-8"),
+        ("/assets/charts.js", "text/javascript; charset=utf-8"),
     ] {
         let response = app
             .clone()
@@ -139,7 +183,7 @@ async fn assets_have_correct_types_and_unknown_paths_return_not_found() {
         );
     }
     let response = app
-        .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
+        .oneshot(Request::get("/api/v1/nothing").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -152,6 +196,9 @@ async fn unavailable_source_returns_json_error_instead_of_empty_measurements() {
         fn snapshot(&self) -> Result<Snapshot, &'static str> {
             Err("meter state is unavailable")
         }
+        fn history(&self) -> Result<HistorySeries, &'static str> {
+            Err("meter state is unavailable")
+        }
     }
     let response = router(Arc::new(Unavailable))
         .oneshot(Request::get("/api/v1/state").body(Body::empty()).unwrap())
@@ -161,4 +208,209 @@ async fn unavailable_source_returns_json_error_instead_of_empty_measurements() {
     let value: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 1000).await.unwrap()).unwrap();
     assert_eq!(value["error"], "meter state is unavailable");
+}
+
+/// A reading shaped like the gateway's, with the load on L1 and the other phases unwired.
+fn lab_reading(power: f32, voltage: f32, frequency: f32) -> crate::input::MeterReading {
+    use crate::input::{MeterReading, PhaseReading, TotalsReading};
+    let unwired = PhaseReading {
+        voltage_v: Some(0.0),
+        current_a: Some(0.0),
+        real_power_w: Some(0.0),
+        apparent_power_va: Some(0.0),
+        reactive_power_var: Some(0.0),
+        cos_phi: Some(1.0),
+        real_energy_consumed_wh: Some(0.0),
+        thd_voltage_pct: None,
+        thd_current_pct: None,
+    };
+    MeterReading {
+        total_power: power,
+        systime: Some(1_789_000_000),
+        frequency_hz: Some(frequency),
+        l1: Some(PhaseReading {
+            voltage_v: Some(voltage),
+            current_a: Some(2.0),
+            real_power_w: Some(power),
+            apparent_power_va: Some(power.abs() * 1.1),
+            reactive_power_var: Some(-30.0),
+            cos_phi: Some(0.9),
+            real_energy_consumed_wh: Some(4000.0),
+            thd_voltage_pct: Some(1.9),
+            thd_current_pct: Some(3.0),
+        }),
+        l2: Some(unwired),
+        l3: Some(unwired),
+        totals: Some(TotalsReading {
+            real_power_w: Some(power),
+            apparent_power_va: Some(power.abs() * 1.1),
+            reactive_power_var: Some(-30.0),
+        }),
+        heartbeat: false,
+    }
+}
+
+#[test]
+fn snapshot_carries_every_phase_the_limits_and_the_events() {
+    let source = source();
+    let mut method = ClosestPowerMatch::new(3.0);
+    source
+        .meter
+        .lock()
+        .unwrap()
+        .apply_reading(lab_reading(500.0, 230.0, 50.0), &mut method);
+
+    let snapshot = source.snapshot().unwrap();
+    let value = serde_json::to_value(&snapshot).unwrap();
+
+    // All three phases are present, including the ones with nothing wired to them.
+    let phases = value["power_quality"]["phases"].as_array().unwrap();
+    assert_eq!(phases.len(), 3);
+    assert_eq!(phases[0]["name"], "L1");
+    assert_eq!(phases[0]["connected"], true);
+    assert_eq!(phases[2]["connected"], false);
+    // A value the meter could not determine stays null rather than becoming zero.
+    assert_eq!(phases[2]["thd_current_pct"], serde_json::Value::Null);
+
+    assert_eq!(value["power_quality"]["frequency_hz"], 50.0);
+    assert_eq!(value["power_quality"]["flow"], "import");
+    assert!(
+        value["power_quality"]["violations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // The dashboard draws the same bands the receiver judges against.
+    assert_eq!(value["limits"]["voltage_min_v"], 207.0);
+    assert_eq!(value["limits"]["frequency_max_hz"], 50.5);
+}
+
+#[test]
+fn snapshot_reports_export_and_flags_a_bad_supply() {
+    let source = source();
+    let mut method = ClosestPowerMatch::new(3.0);
+    source
+        .meter
+        .lock()
+        .unwrap()
+        .apply_reading(lab_reading(-1200.0, 195.0, 48.5), &mut method);
+
+    let value = serde_json::to_value(source.snapshot().unwrap()).unwrap();
+    assert_eq!(value["power_quality"]["flow"], "export");
+    assert_eq!(value["power_quality"]["total_power_watts"], -1200.0);
+
+    let violations = value["power_quality"]["violations"].as_array().unwrap();
+    let quantities: Vec<_> = violations
+        .iter()
+        .map(|violation| violation["quantity"].as_str().unwrap())
+        .collect();
+    assert_eq!(quantities, vec!["frequency_hz", "voltage_v"]);
+    assert_eq!(violations[1]["phase"], "L1");
+}
+
+#[test]
+fn transport_state_is_judged_by_the_receiver_not_claimed_by_the_gateway() {
+    use crate::transport::GatewayTransport;
+
+    let source = source();
+    // Before anything arrives there is nothing to claim.
+    let value = serde_json::to_value(source.snapshot().unwrap()).unwrap();
+    assert_eq!(value["transport"]["state"], "waiting");
+    assert_eq!(value["transport"]["gateway_reporting"], false);
+    assert_eq!(value["transport"]["scion_path"], serde_json::Value::Null);
+
+    let mut method = ClosestPowerMatch::new(3.0);
+    {
+        let mut meter = source.meter.lock().unwrap();
+        meter.record_transport(GatewayTransport {
+            scion_path: Some("1-ff00:0:132 1>3 2-ff00:0:212".to_owned()),
+            queued_readings: Some(4),
+            last_ack_latency_ms: Some(11.5),
+            failover_count: Some(1),
+        });
+        meter.apply_reading(lab_reading(500.0, 230.0, 50.0), &mut method);
+    }
+
+    let value = serde_json::to_value(source.snapshot().unwrap()).unwrap();
+    assert_eq!(value["transport"]["state"], "live");
+    assert_eq!(value["transport"]["gateway_reporting"], true);
+    assert_eq!(
+        value["transport"]["scion_path"],
+        "1-ff00:0:132 1>3 2-ff00:0:212"
+    );
+    assert_eq!(value["transport"]["last_ack_latency_ms"], 11.5);
+    assert_eq!(value["transport"]["queued_readings"], 4);
+    assert_eq!(value["transport"]["failover_count"], 1);
+}
+
+#[test]
+fn history_holds_the_accepted_readings_in_order() {
+    let source = source();
+    let mut method = ClosestPowerMatch::new(3.0);
+    for power in [100.0, 200.0, 300.0] {
+        source
+            .meter
+            .lock()
+            .unwrap()
+            .apply_reading(lab_reading(power, 230.0, 50.0), &mut method);
+    }
+
+    let series = source.history().unwrap();
+    assert_eq!(series.window_seconds, 60);
+    assert_eq!(series.samples.len(), 3);
+    let powers: Vec<_> = series
+        .samples
+        .iter()
+        .map(|sample| sample.total_power_watts)
+        .collect();
+    assert_eq!(powers, vec![100.0, 200.0, 300.0]);
+
+    let value = serde_json::to_value(&series).unwrap();
+    let first = &value["samples"][0];
+    assert_eq!(first["frequency_hz"], 50.0);
+    assert_eq!(first["voltage_v"][0], 230.0);
+    assert_eq!(first["voltage_v"][1], 0.0);
+    // The unwired phases carry no distortion figure, and that survives to the chart.
+    assert_eq!(first["thd_current_pct"][2], serde_json::Value::Null);
+    assert!(first["at"].as_str().unwrap().contains('T'));
+}
+
+#[tokio::test]
+async fn history_endpoint_is_versioned_and_separate_from_the_live_snapshot() {
+    let source = source();
+    let mut method = ClosestPowerMatch::new(3.0);
+    source
+        .meter
+        .lock()
+        .unwrap()
+        .apply_reading(lab_reading(500.0, 230.0, 50.0), &mut method);
+
+    let response = router(source)
+        .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 200_000).await.unwrap()).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["samples"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_unavailable_source_fails_the_history_endpoint_too() {
+    struct Unavailable;
+    impl SnapshotSource for Unavailable {
+        fn snapshot(&self) -> Result<Snapshot, &'static str> {
+            Err("meter state is unavailable")
+        }
+        fn history(&self) -> Result<HistorySeries, &'static str> {
+            Err("meter state is unavailable")
+        }
+    }
+    let response = router(Arc::new(Unavailable))
+        .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

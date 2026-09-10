@@ -3078,6 +3078,7 @@ dependencies = [
  "clap",
  "scion-http3",
  "scion-sdk-utils",
+ "scion-stack",
  "sciparse",
  "serde_json",
  "snap-tokens",

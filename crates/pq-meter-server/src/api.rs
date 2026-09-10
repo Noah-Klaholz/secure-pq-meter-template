@@ -3,7 +3,13 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
-use axum::{Router, body::Bytes, extract::State, http::StatusCode, routing::post};
+use axum::{
+    Router,
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::post,
+};
 use scion_h3_axum::ScionH3AxumServer;
 use scion_quic::{quic::config::QuicConfig, reexport::squiche, socket::GenericScionUdpSocket};
 
@@ -11,6 +17,7 @@ use crate::{
     decision::{DecisionMethod, DeviceChange},
     input::SharedReadingDecoder,
     meter::SharedMeterState,
+    transport::GatewayTransport,
 };
 
 /// Path the server accepts POST requests on.
@@ -56,7 +63,20 @@ pub(crate) fn router(path: &str, state: AppState) -> Router {
 
 /// Validates the whole request before applying each reading in order. Holding both
 /// locks for the batch prevents other requests from interleaving its measurements.
-async fn receive(State(state): State<AppState>, body: Bytes) -> (StatusCode, String) {
+///
+/// TODO(security): the endpoint is unauthenticated. Anything that can reach the SNAP can
+/// post readings and move the state this serves, and nothing ties a batch to the meter it
+/// claims to come from. On a real deployment the network layer should reject an
+/// unauthorized gateway before it gets here, and the reading itself should carry an
+/// identity the receiver checks.
+async fn receive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, String) {
+    // Read before validating the body: the gateway's own view of the link is worth having
+    // even for a batch that turns out to be malformed.
+    let reported_transport = GatewayTransport::from_headers(&headers);
     let readings = match state.reading_decoder.decode_readings(&body) {
         Ok(readings) => readings,
         Err(message) => return (StatusCode::BAD_REQUEST, format!("{message}\n")),
@@ -80,6 +100,8 @@ async fn receive(State(state): State<AppState>, body: Bytes) -> (StatusCode, Str
             );
         }
     };
+
+    meter.record_transport(reported_transport);
 
     let count = readings.len();
     let mut additions = 0;
@@ -140,8 +162,15 @@ fn reading_response(change: DeviceChange, was_first_reading: bool, total_power: 
 /// The client does not verify this certificate. That keeps the setup short, but it means
 /// the connection is encrypted without the client knowing who it talks to. Use a real
 /// certificate before taking anything like this outside of a hackathon.
+///
+/// TODO(security): a certificate regenerated on every start cannot be pinned by anything,
+/// which is what forces the gateway to skip verification. Issue a stable certificate the
+/// gateway is provisioned to expect, then turn its `verify_peer` back on.
 fn quic_config() -> anyhow::Result<squiche::Config> {
     let mut config = QuicConfig::builder()
+        // TODO(security): the receiver does not authenticate gateways either, so it cannot
+        // tell one meter from another. Client certificates would let it, and would pair
+        // with a SNAP token that stops an unknown gateway at the network layer.
         .verify_peer(false)
         .build()
         .to_quiche_config()
@@ -403,7 +432,9 @@ mod tests {
         };
         for body in [r#"{"total_power":100}"#, r#"{"total_power":123}"#] {
             assert_eq!(
-                receive(State(state.clone()), Bytes::from(body)).await.0,
+                receive(State(state.clone()), HeaderMap::new(), Bytes::from(body))
+                    .await
+                    .0,
                 StatusCode::OK
             );
         }
@@ -413,6 +444,7 @@ mod tests {
         assert_eq!(
             receive(
                 State(state),
+                HeaderMap::new(),
                 Bytes::from_static(br#"{"total_power":1e100}"#)
             )
             .await
@@ -457,6 +489,7 @@ mod tests {
         // First reading: baseline
         let (status, resp) = receive(
             State(state.clone()),
+            HeaderMap::new(),
             Bytes::from(r#"{"total_power":100.0}"#),
         )
         .await;
@@ -466,6 +499,7 @@ mod tests {
         // Second reading: unchanged power -> no device state change
         let (status, resp) = receive(
             State(state.clone()),
+            HeaderMap::new(),
             Bytes::from(r#"{"total_power":100.0}"#),
         )
         .await;
@@ -475,6 +509,7 @@ mod tests {
         // Third reading: add 23 W device
         let (status, resp) = receive(
             State(state.clone()),
+            HeaderMap::new(),
             Bytes::from(r#"{"total_power":123.0}"#),
         )
         .await;
@@ -484,6 +519,7 @@ mod tests {
         // Fourth reading: remove 23 W device
         let (status, resp) = receive(
             State(state.clone()),
+            HeaderMap::new(),
             Bytes::from(r#"{"total_power":100.0}"#),
         )
         .await;
@@ -491,7 +527,12 @@ mod tests {
         assert!(resp.starts_with("removed Baseline"));
 
         // Invalid reading
-        let (status, resp) = receive(State(state), Bytes::from(r#"{"message":"invalid"}"#)).await;
+        let (status, resp) = receive(
+            State(state),
+            HeaderMap::new(),
+            Bytes::from(r#"{"message":"invalid"}"#),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(resp.contains("message must contain a power value"));
     }

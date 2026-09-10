@@ -1,11 +1,21 @@
 //! Transport-independent, in-memory state. Only accepted readings update this store.
 
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
 use crate::decision::{DecisionMethod, Device, DeviceChange, contains_device};
+use crate::history::{History, HistoryEntry};
 use crate::input::MeterReading;
+use crate::transport::GatewayTransport;
+
+/// How much of the recent past the dashboard charts can draw.
+pub const HISTORY_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Samples kept for that window. The gateway reads every 200 ms, so this holds the full
+/// window even if every single reading crossed the reporting threshold.
+const HISTORY_CAPACITY: usize = 600;
 
 pub type SharedMeterState = Arc<Mutex<MeterState>>;
 
@@ -16,6 +26,9 @@ pub struct MeterState {
     readings_received: u64,
     last_received_at: Option<DateTime<Utc>>,
     last_change: Option<(DeviceChange, DateTime<Utc>)>,
+    history: History<MeterReading>,
+    /// What the gateway last reported about the link it delivers over.
+    transport: GatewayTransport,
 }
 
 /// An owned, consistent copy lets readers release the lock before formatting a response.
@@ -27,6 +40,7 @@ pub struct MeterSnapshot {
     pub readings_received: u64,
     pub last_received_at: Option<DateTime<Utc>>,
     pub last_change: Option<(DeviceChange, DateTime<Utc>)>,
+    pub transport: GatewayTransport,
 }
 
 impl MeterState {
@@ -38,7 +52,24 @@ impl MeterState {
             readings_received: 0,
             last_received_at: None,
             last_change: None,
+            history: History::bounded(HISTORY_CAPACITY),
+            transport: GatewayTransport::default(),
         }
+    }
+
+    /// Records what the gateway reported about its link. Only a report that carries at
+    /// least one field replaces the previous one, so a sender that omits the headers does
+    /// not blank out what an earlier batch established.
+    pub fn record_transport(&mut self, reported: GatewayTransport) {
+        if !reported.is_empty() {
+            self.transport = reported;
+        }
+    }
+
+    /// The readings of the last [`HISTORY_WINDOW`], for the dashboard charts.
+    pub fn recent_history(&self, now: SystemTime) -> &[HistoryEntry<MeterReading>] {
+        self.history
+            .since(now.checked_sub(HISTORY_WINDOW).unwrap_or(now))
     }
 
     pub fn latest_power(&self) -> Option<f32> {
@@ -54,6 +85,7 @@ impl MeterState {
             readings_received: self.readings_received,
             last_received_at: self.last_received_at,
             last_change: self.last_change,
+            transport: self.transport.clone(),
         }
     }
 
@@ -62,15 +94,40 @@ impl MeterState {
         reading: MeterReading,
         decision_method: &mut dyn DecisionMethod,
     ) -> DeviceChange {
-        let change = decision_method.decide_reading(
-            self.latest_reading.as_ref(),
-            &reading,
-            &self.catalog,
-            &self.active_devices,
-        );
+        // A keepalive says the gateway saw no change, and may carry a level it is still
+        // settling on. Feeding one to the decision method would match an intermediate
+        // value against the catalog and then measure the real change from it.
+        let change = if reading.heartbeat {
+            DeviceChange::None
+        } else {
+            decision_method.decide_reading(
+                self.latest_reading.as_ref(),
+                &reading,
+                &self.catalog,
+                &self.active_devices,
+            )
+        };
+
+        // Reflect any devices the method has learned at runtime in the live catalog,
+        // refreshing the signature of ones already known. Static-catalog methods
+        // return nothing here, so this is a no-op for them.
+        for learned in decision_method.learned_devices() {
+            match self
+                .catalog
+                .iter_mut()
+                .find(|device| device.id == learned.id)
+            {
+                Some(existing) => *existing = learned,
+                None => self.catalog.push(learned),
+            }
+        }
+
         let now = Utc::now();
         match change {
             DeviceChange::Added(device) => {
+                if !contains_device(&self.catalog, device.id) {
+                    self.catalog.push(device);
+                }
                 if !contains_device(&self.active_devices, device.id) {
                     self.active_devices.push(device);
                 }
@@ -84,6 +141,7 @@ impl MeterState {
             self.last_change = Some((change, now));
         }
         self.latest_reading = Some(reading);
+        self.history.push(reading, SystemTime::from(now));
         self.readings_received += 1;
         self.last_received_at = Some(now);
         change
@@ -121,6 +179,46 @@ mod tests {
         state.apply_reading(150.0.into(), &mut method);
         assert_eq!(state.latest_power(), Some(150.0));
         assert_eq!(state.snapshot().readings_received, 2);
+    }
+
+    #[test]
+    fn a_keepalive_is_recorded_but_never_infers_a_device() {
+        use crate::input::MeterReading;
+
+        // Production settling after the client's own filter: one reading is enough.
+        let mut state = MeterState::new(DUMMY_DEVICE_CATALOG.to_vec());
+        let mut method = crate::decision::SettledPowerMatch::new(5.0, 3.0, 1, 8.0);
+
+        state.apply_reading(24.0.into(), &mut method);
+
+        // A level the gateway is still settling on can sit anywhere between two levels.
+        // Matching it would name the wrong device and, worse, leave the real change to be
+        // measured from this intermediate value.
+        let intermediate = MeterReading {
+            heartbeat: true,
+            ..MeterReading::from(89.0)
+        };
+        assert_eq!(
+            state.apply_reading(intermediate, &mut method),
+            DeviceChange::None
+        );
+
+        // It is still a measurement: it counts, and it is the latest reading.
+        assert_eq!(state.latest_power(), Some(89.0));
+        assert_eq!(state.snapshot().readings_received, 2);
+        assert!(state.snapshot().active_devices.is_empty());
+
+        // The settled change that follows is measured from the last real level (24 W), so
+        // the 80 W device that actually switched on is the one that is found. Measured
+        // from the intermediate value instead, the delta would have been 15 W and the
+        // catalog would have named something else entirely.
+        let eighty_watt = DUMMY_DEVICE_CATALOG
+            .iter()
+            .find(|device| device.id == "device-80w")
+            .copied()
+            .expect("the catalog carries the 80 W device");
+        let change = state.apply_reading(104.0.into(), &mut method);
+        assert_eq!(change, DeviceChange::Added(eighty_watt));
     }
 
     #[test]

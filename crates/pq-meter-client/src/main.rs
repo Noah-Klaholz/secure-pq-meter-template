@@ -14,6 +14,8 @@
 //!   starts.
 //! * `--server`: the SCION address of the HTTP/3 server, also printed by the server.
 
+mod link;
+
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -24,6 +26,10 @@ use sciparse::address::ip_socket_addr::ScionSocketIpAddr;
 use tokio_modbus::Slave;
 use umg605_modbus_client::{DEFAULT_MODBUS_PORT, PHASE_COUNT, Phases, Snapshot, Umg605ProClient};
 use url::Url;
+
+use crate::link::{
+    DeliveryStats, HEADER_ACK_LATENCY, HEADER_FAILOVERS, HEADER_PATH, HEADER_QUEUED, ScionLink,
+};
 
 /// SCION AS of the server.
 const SERVER_AS: &str = "2-ff00:0:212";
@@ -104,6 +110,15 @@ struct Args {
         default_value_t = 1000
     )]
     batch_timeout_ms: u64,
+
+    /// Longest gap in milliseconds between recorded readings while nothing changes.
+    ///
+    /// The threshold filter exists to suppress noise, but a power-quality dashboard needs a
+    /// continuous trend and a link that keeps proving it is alive. This records a reading
+    /// even when nothing moved, so voltage and frequency stay plotted through an idle
+    /// installation. Set to 0 to record only threshold crossings.
+    #[arg(long, visible_alias = "heartbeat", default_value_t = 2000)]
+    heartbeat_ms: u64,
 }
 
 #[tokio::main]
@@ -147,16 +162,37 @@ async fn main() -> anyhow::Result<()> {
     // The SDK uses rustls for its control plane; pick a crypto backend.
     scion_sdk_utils::rustls::select_ring_crypto_provider();
 
+    let endhost_api_for_paths = endhost_api.clone();
+
     // One client per program: it holds the connection pool. Building it does no I/O, the
     // connection is established with the first request.
     let client = Client::new(
         Config::new(endhost_api)
-            // A dummy token. Normally a client asks the AA (the authentication and
-            // authorization service) for a SNAP token; here the AA is left out.
+            // TODO(security): development credential, not a real one. A gateway should ask
+            // the AA (the authentication and authorization service) for a SNAP token that
+            // identifies *this* device, so the network can refuse an unknown one before its
+            // packets reach the application. The dummy token identifies nobody.
             .with_auth_token(snap_tokens::v0::dummy_snap_token())
-            // The server uses a self-signed certificate, so its identity is not verified.
+            // TODO(security): the connection is encrypted but the peer is unauthenticated.
+            // `verify_peer(false)` accepts any certificate, so anything that can answer on
+            // the address can impersonate the receiver and collect the meter data. Pin the
+            // backend certificate, or verify against a CA the gateway is provisioned with.
             .with_quic_config(QuicConfig::builder().verify_peer(false).build()),
     );
+
+    // A second, read-only view of the network, used only to report which path is in use.
+    // The gateway's job is delivering readings, so failing to attach is a warning, not an
+    // error: it costs the transport panel on the dashboard and nothing else.
+    let server_as: sciparse::identifier::isd_asn::IsdAsn = SERVER_AS
+        .parse()
+        .context("parsing the SCION AS of the server")?;
+    let mut scion_link = match ScionLink::attach(endhost_api_for_paths, server_as).await {
+        Ok(link) => Some(link),
+        Err(error) => {
+            eprintln!("Warning: cannot report the SCION path in use: {error}");
+            None
+        }
+    };
 
     let meter_socket_addr = SocketAddr::new(args.meter_ip, args.meter_port);
     let meter_timeout = Duration::from_secs(args.meter_timeout);
@@ -167,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
     let meter_interval = Duration::from_millis(args.meter_interval_ms.max(1));
     let batch_size = args.batch_size.max(1);
     let batch_timeout = Duration::from_millis(args.batch_timeout_ms.max(1));
+    let heartbeat = (args.heartbeat_ms > 0).then(|| Duration::from_millis(args.heartbeat_ms));
 
     println!(
         "streaming meter data to {server_scion}{} (interval: {meter_interval:.2?}, batch size: {batch_size}, timeout: {batch_timeout:.2?}) ...",
@@ -181,6 +218,8 @@ async fn main() -> anyhow::Result<()> {
         meter_interval,
         batch_size,
         batch_timeout,
+        heartbeat,
+        &mut scion_link,
     )
     .await?;
 
@@ -310,7 +349,11 @@ fn phase_json(snapshot: &Snapshot, phase: usize) -> serde_json::Value {
 }
 
 /// One complete three-phase measurement, as sent to the server.
-fn measurement_json(snapshot: &Snapshot, total_power: f32) -> serde_json::Value {
+///
+/// `heartbeat` marks a reading sent only to keep the trend and the link alive. The receiver
+/// keeps it as a measurement but leaves it out of device inference: while a level is still
+/// settling this value can sit anywhere between the old level and the new one.
+fn measurement_json(snapshot: &Snapshot, total_power: f32, heartbeat: bool) -> serde_json::Value {
     serde_json::json!({
         // Device detection uses total_power; the server also validates and retains the
         // timestamp, the frequency, and the per-phase context.
@@ -325,7 +368,8 @@ fn measurement_json(snapshot: &Snapshot, total_power: f32) -> serde_json::Value 
             "real_power_w": measured(snapshot.real_power_sum3),
             "apparent_power_va": measured(snapshot.apparent_power_sum3),
             "reactive_power_var": measured(snapshot.reactive_power_sum3),
-        }
+        },
+        "heartbeat": heartbeat,
     })
 }
 
@@ -430,11 +474,34 @@ impl SettledMonitor {
     }
 }
 
+/// Whether this reading is worth recording and sending.
+///
+/// A settled change always is. So is the occasional reading while nothing changes: the
+/// receiver plots a trend from what arrives and judges the link by when it last heard
+/// anything, and total silence is indistinguishable from a gateway that has fallen over.
+/// Without a heartbeat an idle installation would produce an empty chart and a link that
+/// reports itself stale while it is in fact healthy.
+fn should_record(
+    changed: bool,
+    heartbeat: Option<Duration>,
+    last_recorded: Option<Instant>,
+    now: Instant,
+) -> bool {
+    if changed {
+        return true;
+    }
+    heartbeat.is_some_and(|interval| {
+        last_recorded
+            .is_none_or(|last| now.checked_duration_since(last).unwrap_or_default() >= interval)
+    })
+}
+
 /// Reads the meter every `period` and pushes batched readings to the server over SCION
 /// when either the size trigger (`batch_size`) or time trigger (`batch_timeout`) fires.
 ///
 /// Readings are recorded and printed only when changes exceed the noise threshold
 /// and remain settled for `SETTLING_WINDOW`.
+#[allow(clippy::too_many_arguments)]
 async fn monitor(
     meter: &mut Umg605ProClient,
     http: &Client,
@@ -443,6 +510,8 @@ async fn monitor(
     period: Duration,
     batch_size: usize,
     batch_timeout: Duration,
+    heartbeat: Option<Duration>,
+    scion_link: &mut Option<ScionLink>,
 ) -> anyhow::Result<()> {
     // The URL holds the server name and the port. `target` gives the SCION address the
     // packets go to, so the simulated network needs no DNS.
@@ -452,6 +521,8 @@ async fn monitor(
     let mut batch: Vec<serde_json::Value> = Vec::with_capacity(batch_size);
     let mut flush_deadline = tokio::time::Instant::now() + batch_timeout;
     let mut settled_monitor = SettledMonitor::new(SETTLING_WINDOW);
+    let mut delivery = DeliveryStats::default();
+    let mut last_recorded: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -471,17 +542,20 @@ async fn monitor(
                     Some(total_power) => {
                         let current_reading = BaselineReading::from_snapshot(&snapshot);
 
-                        if settled_monitor.process_reading(current_reading, start) {
+                        let changed = settled_monitor.process_reading(current_reading, start);
+                        if should_record(changed, heartbeat, last_recorded, start) {
+                            last_recorded = Some(start);
                             if batch.is_empty() {
                                 flush_deadline = tokio::time::Instant::now() + batch_timeout;
                             }
-                            batch.push(measurement_json(&snapshot, total_power));
+                            batch.push(measurement_json(&snapshot, total_power, !changed));
 
                             println!(
-                                "{} | Batch: {}/{}",
+                                "{} | Batch: {}/{}{}",
                                 summary(&snapshot),
                                 batch.len(),
-                                batch_size
+                                batch_size,
+                                if changed { "" } else { " (heartbeat)" }
                             );
                         }
                     }
@@ -500,12 +574,36 @@ async fn monitor(
 
                 if should_flush_size || should_flush_time {
                     let reason = if should_flush_size { "size trigger" } else { "time trigger" };
-                    send_batch(http, &url, server, &mut batch, reason).await;
+                    if let Some(link) = scion_link.as_mut() {
+                        link.refresh().await;
+                    }
+                    send_batch(
+                        http,
+                        &url,
+                        server,
+                        &mut batch,
+                        reason,
+                        scion_link.as_ref(),
+                        &mut delivery,
+                    )
+                    .await;
                     flush_deadline = tokio::time::Instant::now() + batch_timeout;
                 }
             }
             _ = tokio::time::sleep_until(flush_deadline), if !batch.is_empty() => {
-                send_batch(http, &url, server, &mut batch, "time trigger").await;
+                if let Some(link) = scion_link.as_mut() {
+                    link.refresh().await;
+                }
+                send_batch(
+                    http,
+                    &url,
+                    server,
+                    &mut batch,
+                    "time trigger",
+                    scion_link.as_ref(),
+                    &mut delivery,
+                )
+                .await;
                 flush_deadline = tokio::time::Instant::now() + batch_timeout;
             }
         }
@@ -513,12 +611,18 @@ async fn monitor(
 }
 
 /// Sends buffered measurements to the server over SCION HTTP/3.
+///
+/// The gateway's view of the link rides along as headers: which path it is using, how many
+/// readings were waiting, how long the previous acknowledgement took, and how often the
+/// path has changed. That keeps the measurement body exactly as the receiver documents it.
 async fn send_batch(
     http: &Client,
     url: &str,
     server: &ScionSocketIpAddr,
     batch: &mut Vec<serde_json::Value>,
     reason: &str,
+    link: Option<&ScionLink>,
+    delivery: &mut DeliveryStats,
 ) {
     if batch.is_empty() {
         return;
@@ -535,12 +639,23 @@ async fn send_batch(
     };
     batch.clear();
 
-    let request = match Request::post(url)
+    // These readings are in flight until the server answers.
+    delivery.queued_readings = count;
+
+    let mut builder = Request::post(url)
         .header("content-type", "application/json")
-        .target(server.host())
-        .body(body)
-        .build()
-    {
+        .header(HEADER_QUEUED, delivery.queued_readings.to_string());
+    if let Some(latency) = delivery.last_ack_latency_ms {
+        builder = builder.header(HEADER_ACK_LATENCY, format!("{latency:.1}"));
+    }
+    if let Some(link) = link {
+        builder = builder.header(HEADER_FAILOVERS, link.failover_count().to_string());
+        if let Some(path) = link.current_path() {
+            builder = builder.header(HEADER_PATH, path);
+        }
+    }
+
+    let request = match builder.target(server.host()).body(body).build() {
         Ok(req) => req,
         Err(err) => {
             eprintln!("Warning: building the batch request failed: {err}");
@@ -553,6 +668,10 @@ async fn send_batch(
         Ok(response) => {
             let status = response.status();
             let elapsed = send_start.elapsed();
+            // Acknowledged: nothing is waiting here any more, and the next batch can say
+            // how long this one took.
+            delivery.queued_readings = 0;
+            delivery.last_ack_latency_ms = Some(elapsed.as_secs_f32() * 1000.0);
             if !status.is_success() {
                 eprintln!("Warning: server answered with {status} ({elapsed:.2?})");
             }
@@ -897,7 +1016,7 @@ mod tests {
     #[test]
     fn measurement_carries_all_three_phases_and_the_measured_sums() {
         let snapshot = sample_snapshot();
-        let measurement = measurement_json(&snapshot, snapshot.real_power_sum3);
+        let measurement = measurement_json(&snapshot, snapshot.real_power_sum3, false);
 
         // The total is the meter's own three-phase sum, not L1 alone.
         assert_eq!(measurement["total_power"], json!(25.6_f32));
@@ -930,7 +1049,7 @@ mod tests {
 
     #[test]
     fn unavailable_values_are_sent_as_null_rather_than_dropped_or_zeroed() {
-        let measurement = measurement_json(&sample_snapshot(), 25.6);
+        let measurement = measurement_json(&sample_snapshot(), 25.6, false);
 
         // A zero here would claim a distortion-free phase, and a missing field would look
         // like an older client. Null says what is true: the meter could not measure it.
@@ -948,6 +1067,21 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_says_whether_it_is_a_settled_change_or_a_keepalive() {
+        // The receiver keeps a keepalive as a measurement but leaves it out of device
+        // inference, so the two have to be distinguishable on the wire.
+        let snapshot = sample_snapshot();
+        assert_eq!(
+            measurement_json(&snapshot, 25.6, false)["heartbeat"],
+            json!(false)
+        );
+        assert_eq!(
+            measurement_json(&snapshot, 25.6, true)["heartbeat"],
+            json!(true)
+        );
+    }
+
+    #[test]
     fn exported_power_is_reported_as_a_negative_total() {
         // A site that feeds more into the grid than it draws is normal in a decentralized
         // grid, and the sign has to survive the trip to the server.
@@ -955,7 +1089,7 @@ mod tests {
         snapshot.real_power = [-1200.0, 0.0, 0.0];
         snapshot.real_power_sum3 = -1200.0;
 
-        let measurement = measurement_json(&snapshot, snapshot.real_power_sum3);
+        let measurement = measurement_json(&snapshot, snapshot.real_power_sum3, false);
         assert_eq!(measurement["total_power"], json!(-1200.0_f32));
         assert_eq!(measurement["l1"]["real_power_w"], json!(-1200.0_f32));
     }
@@ -973,6 +1107,57 @@ mod tests {
         );
         assert!(line.contains("THD_I: n/a%"), "{line}");
         assert!(line.contains("THD_I: 125.42%"), "{line}");
+    }
+
+    #[test]
+    fn a_settled_change_is_always_recorded() {
+        let now = Instant::now();
+        // Even immediately after another reading, and even with no heartbeat configured.
+        assert!(should_record(true, None, Some(now), now));
+        assert!(should_record(
+            true,
+            Some(Duration::from_secs(2)),
+            Some(now),
+            now
+        ));
+    }
+
+    #[test]
+    fn an_unchanged_reading_is_recorded_once_the_link_has_been_quiet_too_long() {
+        let t0 = Instant::now();
+        let heartbeat = Some(Duration::from_secs(2));
+
+        // The very first reading has nothing to be quiet since.
+        assert!(should_record(false, heartbeat, None, t0));
+
+        // Inside the interval the noise filter still holds the reading back.
+        assert!(!should_record(
+            false,
+            heartbeat,
+            Some(t0),
+            t0 + Duration::from_millis(1999)
+        ));
+
+        // At the interval it goes out, so the trend and the link stay alive.
+        assert!(should_record(
+            false,
+            heartbeat,
+            Some(t0),
+            t0 + Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn without_a_heartbeat_only_changes_are_recorded() {
+        // `--heartbeat-ms 0` restores the pure change-triggered behaviour.
+        let t0 = Instant::now();
+        assert!(!should_record(
+            false,
+            None,
+            Some(t0),
+            t0 + Duration::from_secs(3600)
+        ));
+        assert!(!should_record(false, None, None, t0));
     }
 
     #[test]
