@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_modbus::Slave;
 use tower::ServiceExt;
-use umg605_modbus_client::{Snapshot, Umg605ProClient, reg};
+use umg605_modbus_client::{Phases, Snapshot, Umg605ProClient, reg};
 
 use crate::{
     api::{AppState, router as api_router},
@@ -60,39 +60,57 @@ async fn spawn_dynamic_mock_meter(
                         let (hi, lo) = encode_i32(current_snapshot.systime);
                         regs[0] = hi;
                         regs[1] = lo;
-                    } else if start_addr == reg::THD_CURRENT_L1 && count == 2 {
-                        let (hi, lo) = encode_f32(current_snapshot.thd_current_l1);
-                        regs[0] = hi;
-                        regs[1] = lo;
-                    } else if start_addr == reg::VOLTAGE_L1 {
+                    } else if start_addr == reg::MEASUREMENT_BLOCK_START {
                         let set_f32 = |regs: &mut [u16], addr: u16, val: f32| {
-                            let offset = (addr - reg::VOLTAGE_L1) as usize;
+                            let offset = (addr - reg::MEASUREMENT_BLOCK_START) as usize;
                             if offset + 1 < regs.len() {
                                 let (hi, lo) = encode_f32(val);
                                 regs[offset] = hi;
                                 regs[offset + 1] = lo;
                             }
                         };
-                        set_f32(&mut regs, reg::VOLTAGE_L1, current_snapshot.voltage_l1);
-                        set_f32(&mut regs, reg::CURRENT_L1, current_snapshot.current_l1);
-                        set_f32(&mut regs, reg::REAL_POWER_L1, current_snapshot.real_power_l1);
-                        set_f32(
+                        let set_phases = |regs: &mut [u16], addr: u16, values: Phases| {
+                            for (phase, value) in values.into_iter().enumerate() {
+                                set_f32(regs, addr + reg::PHASE_STRIDE * phase as u16, value);
+                            }
+                        };
+                        set_phases(&mut regs, reg::VOLTAGE_L1, current_snapshot.voltage);
+                        set_phases(&mut regs, reg::CURRENT_L1, current_snapshot.current);
+                        set_phases(&mut regs, reg::REAL_POWER_L1, current_snapshot.real_power);
+                        set_phases(
                             &mut regs,
                             reg::APPARENT_POWER_L1,
-                            current_snapshot.apparent_power_l1,
+                            current_snapshot.apparent_power,
                         );
-                        set_f32(
+                        set_phases(
                             &mut regs,
                             reg::REACTIVE_POWER_L1,
-                            current_snapshot.reactive_power_l1,
+                            current_snapshot.reactive_power,
                         );
-                        set_f32(&mut regs, reg::COS_PHI_L1, current_snapshot.cos_phi_l1);
-                        set_f32(&mut regs, reg::FREQUENCY, current_snapshot.frequency);
-                        set_f32(
+                        set_phases(&mut regs, reg::COS_PHI_L1, current_snapshot.cos_phi);
+                        set_phases(
                             &mut regs,
                             reg::REAL_ENERGY_CONSUMED_L1,
-                            current_snapshot.real_energy_consumed_l1,
+                            current_snapshot.real_energy_consumed,
                         );
+                        set_phases(&mut regs, reg::THD_VOLTAGE_L1, current_snapshot.thd_voltage);
+                        set_phases(&mut regs, reg::THD_CURRENT_L1, current_snapshot.thd_current);
+                        set_f32(
+                            &mut regs,
+                            reg::REAL_POWER_SUM3,
+                            current_snapshot.real_power_sum3,
+                        );
+                        set_f32(
+                            &mut regs,
+                            reg::APPARENT_POWER_SUM3,
+                            current_snapshot.apparent_power_sum3,
+                        );
+                        set_f32(
+                            &mut regs,
+                            reg::REACTIVE_POWER_SUM3,
+                            current_snapshot.reactive_power_sum3,
+                        );
+                        set_f32(&mut regs, reg::FREQUENCY, current_snapshot.frequency);
                     }
 
                     let byte_count = (count * 2) as u8;
@@ -119,41 +137,74 @@ async fn spawn_dynamic_mock_meter(
     (addr, handle)
 }
 
+/// A value the meter could determine, or `None` for one it reported as NaN. Mirrors the
+/// mapping the gateway client applies before sending.
+fn measured(value: f32) -> Option<f32> {
+    value.is_finite().then_some(value)
+}
+
 /// Helper: converts a meter snapshot into the client JSON batch payload format.
 fn format_client_batch_json(snapshot: &Snapshot) -> Vec<u8> {
+    let phase = |phase: usize| {
+        serde_json::json!({
+            "voltage_v": measured(snapshot.voltage[phase]),
+            "current_a": measured(snapshot.current[phase]),
+            "real_power_w": measured(snapshot.real_power[phase]),
+            "apparent_power_va": measured(snapshot.apparent_power[phase]),
+            "reactive_power_var": measured(snapshot.reactive_power[phase]),
+            "cos_phi": measured(snapshot.cos_phi[phase]),
+            "real_energy_consumed_wh": measured(snapshot.real_energy_consumed[phase]),
+            "thd_voltage_pct": measured(snapshot.thd_voltage[phase]),
+            "thd_current_pct": measured(snapshot.thd_current[phase]),
+        })
+    };
     let item = serde_json::json!({
-        "total_power": snapshot.real_power_l1,
+        "total_power": snapshot.real_power_sum3,
         "systime": snapshot.systime,
-        "frequency_hz": snapshot.frequency,
-        "l1": {
-            "voltage_v": snapshot.voltage_l1,
-            "current_a": snapshot.current_l1,
-            "real_power_w": snapshot.real_power_l1,
-            "apparent_power_va": snapshot.apparent_power_l1,
-            "reactive_power_var": snapshot.reactive_power_l1,
-            "cos_phi": snapshot.cos_phi_l1,
-            "real_energy_consumed_wh": snapshot.real_energy_consumed_l1,
-            "thd_current_pct": snapshot.thd_current_l1,
+        "frequency_hz": measured(snapshot.frequency),
+        "l1": phase(0),
+        "l2": phase(1),
+        "l3": phase(2),
+        "totals": {
+            "real_power_w": measured(snapshot.real_power_sum3),
+            "apparent_power_va": measured(snapshot.apparent_power_sum3),
+            "reactive_power_var": measured(snapshot.reactive_power_sum3),
         }
     });
     serde_json::to_vec(&vec![item]).unwrap()
 }
 
+/// The meter in the lab: L1 carries the load, the other two phases are not connected, so
+/// the meter reports the distortion of their absent current as NaN.
+fn lab_snapshot(systime: i32, real_power_l1: f32) -> Snapshot {
+    Snapshot {
+        systime,
+        frequency: 50.0,
+        voltage: [230.0, 0.0, 0.0],
+        current: [0.435, 0.0, 0.0],
+        real_power: [real_power_l1, 0.0, 0.0],
+        real_power_sum3: real_power_l1,
+        apparent_power: [100.0, 0.0, 0.0],
+        apparent_power_sum3: 100.0,
+        reactive_power: [0.0, 0.0, 0.0],
+        reactive_power_sum3: 0.0,
+        cos_phi: [1.0, 1.0, 1.0],
+        real_energy_consumed: [5000.0, 0.0, 0.0],
+        thd_voltage: [1.5, f32::NAN, f32::NAN],
+        thd_current: [1.5, f32::NAN, f32::NAN],
+    }
+}
+
+/// Sets the load on L1 and keeps the three-phase sum consistent with it.
+fn set_real_power(snapshot: &mut Snapshot, watts: f32) {
+    snapshot.real_power[0] = watts;
+    snapshot.real_power_sum3 = watts + snapshot.real_power[1] + snapshot.real_power[2];
+}
+
 #[tokio::test]
 async fn full_e2e_pipeline_modbus_to_client_to_server_to_dashboard() {
-    // 1. Setup mock Modbus hardware meter
-    let mock_meter_state = Arc::new(Mutex::new(Snapshot {
-        systime: 1_700_000_001,
-        frequency: 50.0,
-        voltage_l1: 230.0,
-        current_l1: 0.435,
-        real_power_l1: 100.0, // baseline 100.0 W
-        apparent_power_l1: 100.0,
-        reactive_power_l1: 0.0,
-        cos_phi_l1: 1.0,
-        real_energy_consumed_l1: 5000.0,
-        thd_current_l1: 1.5,
-    }));
+    // 1. Setup mock Modbus hardware meter (baseline 100.0 W)
+    let mock_meter_state = Arc::new(Mutex::new(lab_snapshot(1_700_000_001, 100.0)));
 
     let (meter_addr, _server_task) = spawn_dynamic_mock_meter(mock_meter_state.clone()).await;
 
@@ -188,7 +239,7 @@ async fn full_e2e_pipeline_modbus_to_client_to_server_to_dashboard() {
     // Phase 1: Record Baseline (100.0 W)
     // ==========================================
     let snapshot = modbus_client.snapshot().await.unwrap();
-    assert_eq!(snapshot.real_power_l1, 100.0);
+    assert_eq!(snapshot.real_power_sum3, 100.0);
 
     let batch_json = format_client_batch_json(&snapshot);
     let req = Request::post("/edh/v1/hello")
@@ -213,12 +264,12 @@ async fn full_e2e_pipeline_modbus_to_client_to_server_to_dashboard() {
     // Phase 2: Device Turned On (+23.0 W Raspberry Pi)
     // ==========================================
     // Meter power jumps to 123.0 W
-    mock_meter_state.lock().unwrap().real_power_l1 = 123.0;
+    set_real_power(&mut mock_meter_state.lock().unwrap(), 123.0);
     mock_meter_state.lock().unwrap().systime += 1;
 
     // Reading 1 of device turn-on (candidate starts settling)
     let snapshot = modbus_client.snapshot().await.unwrap();
-    assert_eq!(snapshot.real_power_l1, 123.0);
+    assert_eq!(snapshot.real_power_sum3, 123.0);
     let req = Request::post("/edh/v1/hello")
         .body(Body::from(format_client_batch_json(&snapshot)))
         .unwrap();
@@ -256,12 +307,12 @@ async fn full_e2e_pipeline_modbus_to_client_to_server_to_dashboard() {
     // Phase 3: Device Turned Off (-23.0 W Raspberry Pi)
     // ==========================================
     // Meter power drops back to 100.0 W
-    mock_meter_state.lock().unwrap().real_power_l1 = 100.0;
+    set_real_power(&mut mock_meter_state.lock().unwrap(), 100.0);
     mock_meter_state.lock().unwrap().systime += 1;
 
     // Reading 1 of removal
     let snapshot = modbus_client.snapshot().await.unwrap();
-    assert_eq!(snapshot.real_power_l1, 100.0);
+    assert_eq!(snapshot.real_power_sum3, 100.0);
     let req = Request::post("/edh/v1/hello")
         .body(Body::from(format_client_batch_json(&snapshot)))
         .unwrap();

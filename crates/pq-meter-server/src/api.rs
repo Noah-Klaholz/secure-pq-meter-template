@@ -288,7 +288,7 @@ mod tests {
         let before = state.meter.lock().unwrap().snapshot();
         for invalid in [
             serde_json::json!([]),
-            serde_json::json!([client_reading(123.0, 11), client_reading(123.0, 12), {"total_power": -1}]),
+            serde_json::json!([client_reading(123.0, 11), client_reading(123.0, 12), {"total_power": 1e100}]),
             serde_json::json!([client_reading(123.0, 11), {"total_power": 123, "l1": {"voltage_v": "bad"}}]),
         ] {
             assert_eq!(
@@ -326,6 +326,32 @@ mod tests {
             (StatusCode::OK, "added Baseline (23.0 W)\n".to_owned())
         );
         assert_eq!(state.meter.lock().unwrap().snapshot().readings_received, 2);
+    }
+
+    #[tokio::test]
+    async fn exported_power_is_accepted_and_detected_as_a_change() {
+        // A site that feeds into the grid reports a negative total. Detection works on the
+        // change between readings, so it has to keep working below zero: the meter never
+        // leaves export here, and switching the 145 W device on and off still registers.
+        let state = test_state(Box::new(ClosestPowerMatch::new(3.0)));
+        assert_eq!(
+            post_json(state.clone(), serde_json::json!({"total_power": -1000.0})).await,
+            (StatusCode::OK, "baseline recorded at -1000.0 W\n".to_owned())
+        );
+
+        let (status, response) =
+            post_json(state.clone(), serde_json::json!({"total_power": -855.0})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.starts_with("added Macbook Air"), "{response}");
+
+        let (status, response) =
+            post_json(state.clone(), serde_json::json!({"total_power": -1000.0})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.starts_with("removed Macbook Air"), "{response}");
+
+        let meter = state.meter.lock().unwrap().snapshot();
+        assert_eq!(meter.total_power_watts, Some(-1000.0));
+        assert_eq!(meter.readings_received, 3);
     }
 
     #[tokio::test]
@@ -368,7 +394,7 @@ mod tests {
         assert_eq!(before.readings_received, 2);
         assert!(before.devices[0].active);
         assert_eq!(
-            receive(State(state), Bytes::from_static(br#"{"total_power":-1}"#))
+            receive(State(state), Bytes::from_static(br#"{"total_power":1e100}"#))
                 .await
                 .0,
             StatusCode::BAD_REQUEST

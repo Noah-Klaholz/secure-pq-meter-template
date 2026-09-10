@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_modbus::Slave;
-use umg605_modbus_client::{ConnectError, ReadError, Umg605ProClient, reg};
+use umg605_modbus_client::{ConnectError, Phases, ReadError, Umg605ProClient, reg};
 
 fn encode_f32(val: f32) -> (u16, u16) {
     let bits = val.to_bits();
@@ -17,15 +19,22 @@ fn encode_i32(val: i32) -> (u16, u16) {
 }
 
 /// Spawns a mock Modbus TCP server that responds to holding register read requests.
-async fn spawn_mock_modbus_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+///
+/// The returned counter records how many requests the server has answered, which is what
+/// lets a test hold the client to a fixed number of round trips.
+async fn spawn_mock_modbus_server() -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let served = requests.clone();
 
     let handle = tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
+            let served = served.clone();
             tokio::spawn(async move {
                 let mut header = [0u8; 12];
                 while stream.read_exact(&mut header).await.is_ok() {
+                    served.fetch_add(1, Ordering::SeqCst);
                     let tid = u16::from_be_bytes([header[0], header[1]]);
                     let uid = header[6];
                     let fc = header[7];
@@ -65,23 +74,39 @@ async fn spawn_mock_modbus_server() -> (SocketAddr, tokio::task::JoinHandle<()>)
                         let (hi, lo) = encode_f32(1.85);
                         regs[0] = hi;
                         regs[1] = lo;
-                    } else if start_addr == reg::VOLTAGE_L1 {
+                    } else if start_addr == reg::MEASUREMENT_BLOCK_START {
                         let set_f32 = |regs: &mut [u16], addr: u16, val: f32| {
-                            let offset = (addr - reg::VOLTAGE_L1) as usize;
+                            let offset = (addr - reg::MEASUREMENT_BLOCK_START) as usize;
                             if offset + 1 < regs.len() {
                                 let (hi, lo) = encode_f32(val);
                                 regs[offset] = hi;
                                 regs[offset + 1] = lo;
                             }
                         };
-                        set_f32(&mut regs, reg::VOLTAGE_L1, 230.5);
-                        set_f32(&mut regs, reg::CURRENT_L1, 4.2);
-                        set_f32(&mut regs, reg::REAL_POWER_L1, 968.1);
-                        set_f32(&mut regs, reg::APPARENT_POWER_L1, 968.5);
-                        set_f32(&mut regs, reg::REACTIVE_POWER_L1, 15.0);
-                        set_f32(&mut regs, reg::COS_PHI_L1, 0.99);
+                        let set_phases = |regs: &mut [u16], addr: u16, values: Phases| {
+                            for (phase, value) in values.into_iter().enumerate() {
+                                set_f32(regs, addr + reg::PHASE_STRIDE * phase as u16, value);
+                            }
+                        };
+                        set_phases(&mut regs, reg::VOLTAGE_L1, [230.5, 231.5, 232.5]);
+                        set_phases(&mut regs, reg::CURRENT_L1, [4.2, 4.3, 4.4]);
+                        set_phases(&mut regs, reg::REAL_POWER_L1, [968.1, 970.1, 972.1]);
+                        set_phases(&mut regs, reg::APPARENT_POWER_L1, [968.5, 970.5, 972.5]);
+                        set_phases(&mut regs, reg::REACTIVE_POWER_L1, [15.0, 16.0, 17.0]);
+                        set_phases(&mut regs, reg::COS_PHI_L1, [0.99, 0.98, 0.97]);
+                        set_phases(
+                            &mut regs,
+                            reg::REAL_ENERGY_CONSUMED_L1,
+                            [123456.0, 123457.0, 123458.0],
+                        );
+                        set_phases(&mut regs, reg::THD_VOLTAGE_L1, [1.85, 1.86, 1.87]);
+                        // As on the real meter, a phase with nothing connected reports the
+                        // harmonic distortion of its current as NaN.
+                        set_phases(&mut regs, reg::THD_CURRENT_L1, [2.5, f32::NAN, f32::NAN]);
+                        set_f32(&mut regs, reg::REAL_POWER_SUM3, 2910.3);
+                        set_f32(&mut regs, reg::APPARENT_POWER_SUM3, 2911.5);
+                        set_f32(&mut regs, reg::REACTIVE_POWER_SUM3, 48.0);
                         set_f32(&mut regs, reg::FREQUENCY, 50.02);
-                        set_f32(&mut regs, reg::REAL_ENERGY_CONSUMED_L1, 123456.0);
                     } else if count == 2 {
                         let (hi, lo) = encode_f32(42.0);
                         regs[0] = hi;
@@ -109,12 +134,12 @@ async fn spawn_mock_modbus_server() -> (SocketAddr, tokio::task::JoinHandle<()>)
         }
     });
 
-    (addr, handle)
+    (addr, requests, handle)
 }
 
 #[tokio::test]
 async fn connects_and_reads_snapshot_end_to_end() {
-    let (addr, _server) = spawn_mock_modbus_server().await;
+    let (addr, _requests, _server) = spawn_mock_modbus_server().await;
     let mut client = Umg605ProClient::connect_tcp(addr, Slave(1), Duration::from_secs(2))
         .await
         .expect("should connect to mock server");
@@ -122,20 +147,41 @@ async fn connects_and_reads_snapshot_end_to_end() {
     let snapshot = client.snapshot().await.expect("snapshot read failed");
 
     assert_eq!(snapshot.systime, 1_700_000_000);
-    assert_eq!(snapshot.voltage_l1, 230.5);
-    assert_eq!(snapshot.current_l1, 4.2);
-    assert_eq!(snapshot.real_power_l1, 968.1);
-    assert_eq!(snapshot.apparent_power_l1, 968.5);
-    assert_eq!(snapshot.reactive_power_l1, 15.0);
-    assert_eq!(snapshot.cos_phi_l1, 0.99);
     assert_eq!(snapshot.frequency, 50.02);
-    assert_eq!(snapshot.real_energy_consumed_l1, 123456.0);
-    assert_eq!(snapshot.thd_current_l1, 1.85);
+    assert_eq!(snapshot.voltage, [230.5, 231.5, 232.5]);
+    assert_eq!(snapshot.current, [4.2, 4.3, 4.4]);
+    assert_eq!(snapshot.real_power, [968.1, 970.1, 972.1]);
+    assert_eq!(snapshot.real_power_sum3, 2910.3);
+    assert_eq!(snapshot.apparent_power, [968.5, 970.5, 972.5]);
+    assert_eq!(snapshot.apparent_power_sum3, 2911.5);
+    assert_eq!(snapshot.reactive_power, [15.0, 16.0, 17.0]);
+    assert_eq!(snapshot.reactive_power_sum3, 48.0);
+    assert_eq!(snapshot.cos_phi, [0.99, 0.98, 0.97]);
+    assert_eq!(
+        snapshot.real_energy_consumed,
+        [123456.0, 123457.0, 123458.0]
+    );
+    assert_eq!(snapshot.thd_voltage, [1.85, 1.86, 1.87]);
+    assert_eq!(snapshot.thd_current[0], 2.5);
+    assert!(snapshot.thd_current[1].is_nan() && snapshot.thd_current[2].is_nan());
+}
+
+#[tokio::test]
+async fn snapshot_costs_two_modbus_transactions() {
+    let (addr, requests, _server) = spawn_mock_modbus_server().await;
+    let mut client = Umg605ProClient::connect_tcp(addr, Slave(1), Duration::from_secs(2))
+        .await
+        .expect("should connect to mock server");
+
+    // Every measured value lies in one block, so a snapshot costs one read for the clock
+    // and one for the measurements, no matter how many values it carries.
+    client.snapshot().await.expect("snapshot read failed");
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
 async fn reads_individual_registers_and_blocks() {
-    let (addr, _server) = spawn_mock_modbus_server().await;
+    let (addr, _requests, _server) = spawn_mock_modbus_server().await;
     let mut client = Umg605ProClient::connect_tcp(addr, Slave(1), Duration::from_secs(2))
         .await
         .expect("should connect");
@@ -155,7 +201,7 @@ async fn reads_individual_registers_and_blocks() {
 
 #[tokio::test]
 async fn handles_modbus_exceptions() {
-    let (addr, _server) = spawn_mock_modbus_server().await;
+    let (addr, _requests, _server) = spawn_mock_modbus_server().await;
     let mut client = Umg605ProClient::connect_tcp(addr, Slave(1), Duration::from_secs(2))
         .await
         .expect("should connect");
@@ -172,7 +218,7 @@ async fn handles_modbus_exceptions() {
 
 #[tokio::test]
 async fn handles_read_timeout() {
-    let (addr, _server) = spawn_mock_modbus_server().await;
+    let (addr, _requests, _server) = spawn_mock_modbus_server().await;
     // Timeout set to 100ms, while address 8888 delays by 500ms
     let mut client = Umg605ProClient::connect_tcp(addr, Slave(1), Duration::from_millis(100))
         .await

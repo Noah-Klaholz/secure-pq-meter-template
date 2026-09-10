@@ -182,23 +182,41 @@ or a non-empty JSON array in the client's format:
       "reactive_power_var": -10.0,
       "cos_phi": 0.9,
       "real_energy_consumed_wh": 1234.0,
+      "thd_voltage_pct": 1.85,
       "thd_current_pct": 2.0
+    },
+    "l2": { "…": "same nine fields" },
+    "l3": { "…": "same nine fields" },
+    "totals": {
+      "real_power_w": 100.0,
+      "apparent_power_va": 115.0,
+      "reactive_power_var": -10.0
     }
   }
 ]
 ```
 
-`total_power` must be a finite, non-negative number in watts. It is the authoritative
-input for device detection; the current client populates it from L1 real power, so it
-is **not a measured three-phase sum**. The server does not derive it from `l1`.
+`total_power` must be a finite number in watts and is the authoritative input for device
+detection. The client fills it from the meter's own three-phase real-power sum (register
+19026), not from L1 alone. It is **signed**: a site that exports more than it draws reports
+a negative total, which is a normal reading in a decentralized grid, and detection works on
+the change between readings, so it keeps working below zero. The server does not derive the
+total from the phases.
 
-For compatibility, `systime`, `frequency_hz`, and `l1` may be omitted. When supplied,
-`systime` must be a signed 32-bit integer, matching the client's raw meter register;
-`frequency_hz` must be a finite number; and `l1` must contain all eight numeric fields
-shown above, each finite. Explicit `null` and string values are rejected. No additional
-physical range checks are applied to context fields; signed reactive power is accepted.
-Unknown fields are ignored. Legacy aliases `power`, `power_watts`, and `power_l1_n`,
-and the legacy object `{"message":"100"}`, remain supported.
+For compatibility, every field except `total_power` may be omitted. When supplied,
+`systime` must be a signed 32-bit integer, matching the client's raw meter register; `l1`,
+`l2`, `l3` must each contain all nine numeric fields shown above, and `totals` all three.
+Unknown fields are ignored. Legacy aliases `power`, `power_watts`, and `power_l1_n`, and the
+legacy object `{"message":"100"}`, remain supported.
+
+A single measured value may be `null`, meaning the meter reported it as unavailable rather
+than as a number. This is not a theoretical case: a UMG 605-PRO wired up on one phase
+answers the THD registers of the other two with NaN, and JSON has no way to spell that. Null
+is kept as "not measured" instead of being flattened to zero, which would claim a
+distortion-free phase that was never measured. The distinction only applies to individual
+values — `frequency_hz` and the fields inside `l1`, `l2`, `l3` and `totals`. The blocks
+themselves, and `systime`, are structure rather than measurement: an explicit `null` there
+is rejected, as are strings and non-finite numbers anywhere.
 
 The entire request is validated before any state changes. Empty batches, malformed JSON,
 and invalid readings return HTTP 400 without updating either meter or decision state.
@@ -211,7 +229,8 @@ keeps the baseline/device-change response; multiple readings return, for example
 `accepted 10 readings: 1 added, 0 removed`. This fits the client's 4096-byte response limit.
 
 The latest complete accepted reading is available as `latest_reading` in `GET /api/v1/state`.
-Missing context is omitted from that object; before any readings it is `null`. A later
+Missing context is omitted from that object; a value the meter could not determine stays
+`null` there, so the two remain distinguishable. Before any readings it is `null`. A later
 power-only reading replaces the previous context rather than retaining stale values.
 The server receipt timestamp (`last_received_at`) remains separate from meter `systime`.
 Only the latest reading is retained; the dashboard UI and device algorithms still use
@@ -303,10 +322,36 @@ cargo run -p umg605-modbus-client --bin pinger -- --ip 192.168.1.50 monitor
 Voltage L1: 230.12 V, Current L1: 1.83 A, Power L1-N: 420.75 W
 ```
 
+The `snapshot` subcommand prints the complete set the gateway sends instead, which is the
+quickest way to see what the meter's wiring actually delivers on each phase:
+
+```bash
+cargo run -p umg605-modbus-client --bin pinger -- --ip 192.168.1.50 snapshot
+```
+
+```text
+systime 1789069140 | 33.24ms | f 50.01 Hz | Sum3 P 47.61 W, S 113.47 VA, Q -44.79 var
+  L1: U 239.48 V, I 0.47 A, P 47.61 W, ..., THD-U 1.91 %, THD-I 141.47 %
+  L2: U 0.00 V, I 0.00 A, P 0.00 W, ..., THD-U n/a %, THD-I n/a %
+  L3: U 0.00 V, I 0.00 A, P 0.00 W, ..., THD-U n/a %, THD-I n/a %
+```
+
+`n/a` is a value the meter reports as unavailable: with only L1 connected, the harmonic
+distortion of a current that is not flowing has nothing to be measured against.
+
 The meter has to be reachable from the machine you run this on, which on the day means the Pi.
 
 In your own code the entry point is `Umg605ProClient`: `connect_tcp` opens the connection,
-and `voltage_l1`, `current_l1` and `power_l1_n` each read one measured value.  
+and `voltage_l1`, `current_l1` and `power_l1_n` each read one measured value.
+
+`snapshot` is what the gateway uses instead. Every measured value of the meter lies in the
+contiguous range 19000–19121, which is 122 registers and therefore fits in a single Modbus
+read; a snapshot costs one read for that block and one for the clock, no matter how many
+values it carries, and the values in it are consistent with each other. It returns all three
+phases — voltage, current, real/apparent/reactive power, cos phi, energy and both THD
+figures — together with the three-phase sums the meter measures itself. Values the meter
+cannot determine come back as NaN rather than as an error, so check `is_finite` before using
+one.  
 
 Which register holds which value is in the [register map of the meter][register-map].
 

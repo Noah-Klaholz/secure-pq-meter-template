@@ -167,69 +167,121 @@ impl RegisterBlock {
         let (hi, lo) = self.pair(addr)?;
         Ok((((hi as u32) << 16) | (lo as u32)) as i32)
     }
+
+    /// Decodes the three float32 values of a per-phase quantity whose L1 value is at `addr`.
+    pub fn phases_at(&self, addr: u16) -> Result<Phases, ReadError> {
+        let mut values = [0.0; PHASE_COUNT];
+        for (phase, value) in values.iter_mut().enumerate() {
+            *value = self.f32_at(addr + reg::PHASE_STRIDE * phase as u16)?;
+        }
+        Ok(values)
+    }
 }
 
+/// Number of phases a three-phase meter measures.
+pub const PHASE_COUNT: usize = 3;
+
+/// One value per phase, ordered L1, L2, L3.
+pub type Phases = [f32; PHASE_COUNT];
+
 /// Addresses of the registers read together by [`Umg605ProClient::snapshot`].
+///
+/// The three values of a per-phase quantity sit next to each other, L1 first, so the
+/// address of L2 and L3 is the address of L1 plus one or two [`PHASE_STRIDE`].
 pub mod reg {
     pub const SYSTIME: u16 = 4;
+
+    /// Registers between the value of one phase and the same value of the next phase.
+    pub const PHASE_STRIDE: u16 = 2;
+
     pub const VOLTAGE_L1: u16 = 19000;
     pub const CURRENT_L1: u16 = 19012;
     pub const REAL_POWER_L1: u16 = 19020;
+    pub const REAL_POWER_SUM3: u16 = 19026;
     pub const APPARENT_POWER_L1: u16 = 19028;
+    pub const APPARENT_POWER_SUM3: u16 = 19034;
     pub const REACTIVE_POWER_L1: u16 = 19036;
+    pub const REACTIVE_POWER_SUM3: u16 = 19042;
     pub const COS_PHI_L1: u16 = 19044;
     pub const FREQUENCY: u16 = 19050;
     pub const REAL_ENERGY_CONSUMED_L1: u16 = 19062;
+    pub const THD_VOLTAGE_L1: u16 = 19110;
     pub const THD_CURRENT_L1: u16 = 19116;
+    /// Last measured value of the block, and therefore the end of it.
+    pub const THD_CURRENT_L3: u16 = 19120;
 
-    /// Registers spanning [`VOLTAGE_L1`] up to and including [`REAL_ENERGY_CONSUMED_L1`].
-    /// Modbus allows up to 125 per read, so this fits in one transaction.
-    pub const MEASUREMENT_BLOCK_LEN: u16 = REAL_ENERGY_CONSUMED_L1 + 2 - VOLTAGE_L1;
+    /// First register of the block covering every measured value of a `Snapshot`.
+    pub const MEASUREMENT_BLOCK_START: u16 = VOLTAGE_L1;
+
+    /// Registers from [`MEASUREMENT_BLOCK_START`] up to and including the second register
+    /// of [`THD_CURRENT_L3`]. Modbus allows up to 125 registers per read, so the complete
+    /// three-phase snapshot fits in one transaction.
+    pub const MEASUREMENT_BLOCK_LEN: u16 = THD_CURRENT_L3 + 2 - MEASUREMENT_BLOCK_START;
+
+    /// Reading more than this in one request is outside the Modbus TCP spec. Extending the
+    /// block past the limit has to fail the build rather than the meter.
+    const MODBUS_MAX_REGISTERS_PER_READ: u16 = 125;
+    const _: () = assert!(MEASUREMENT_BLOCK_LEN <= MODBUS_MAX_REGISTERS_PER_READ);
 }
 
 /// One consistent set of readings taken from the meter.
+///
+/// Quantities the meter cannot determine come back as NaN rather than as an error: a phase
+/// with nothing connected to it carries no current, and the harmonic distortion of a current
+/// that is not there is undefined. Callers have to treat every field as possibly non-finite.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Snapshot {
     pub systime: i32,
     pub frequency: f32,
-    pub voltage_l1: f32,
-    pub current_l1: f32,
-    pub real_power_l1: f32,
-    pub apparent_power_l1: f32,
-    pub reactive_power_l1: f32,
-    pub cos_phi_l1: f32,
-    pub real_energy_consumed_l1: f32,
-    pub thd_current_l1: f32,
+    pub voltage: Phases,
+    pub current: Phases,
+    pub real_power: Phases,
+    /// The meter's own sum P1+P2+P3, negative when the installation exports power.
+    pub real_power_sum3: f32,
+    pub apparent_power: Phases,
+    pub apparent_power_sum3: f32,
+    pub reactive_power: Phases,
+    pub reactive_power_sum3: f32,
+    pub cos_phi: Phases,
+    pub real_energy_consumed: Phases,
+    pub thd_voltage: Phases,
+    pub thd_current: Phases,
 }
 
 impl Umg605ProClient {
-    /// Reads every value of a [`Snapshot`] in three Modbus transactions.
+    /// Reads every value of a [`Snapshot`] in two Modbus transactions.
     ///
-    /// The measured values sit in one contiguous range, so they come back in a single
-    /// read; the clock and the THD register live elsewhere and cost one read each.
+    /// All measured values lie in one contiguous range, so the complete three-phase
+    /// snapshot arrives in a single read and the values are consistent with each other.
+    /// Only the clock, which sits at the very start of the register map, costs a second
+    /// read.
     pub async fn snapshot(&mut self) -> Result<Snapshot, ReadError> {
         let clock = self.read_block(reg::SYSTIME, 2).await?;
         let measurements = self
-            .read_block(reg::VOLTAGE_L1, reg::MEASUREMENT_BLOCK_LEN)
+            .read_block(reg::MEASUREMENT_BLOCK_START, reg::MEASUREMENT_BLOCK_LEN)
             .await?;
-        let thd = self.read_block(reg::THD_CURRENT_L1, 2).await?;
 
         Ok(Snapshot {
             systime: clock.i32_at(reg::SYSTIME)?,
             frequency: measurements.f32_at(reg::FREQUENCY)?,
-            voltage_l1: measurements.f32_at(reg::VOLTAGE_L1)?,
-            current_l1: measurements.f32_at(reg::CURRENT_L1)?,
-            real_power_l1: measurements.f32_at(reg::REAL_POWER_L1)?,
-            apparent_power_l1: measurements.f32_at(reg::APPARENT_POWER_L1)?,
-            reactive_power_l1: measurements.f32_at(reg::REACTIVE_POWER_L1)?,
-            cos_phi_l1: measurements.f32_at(reg::COS_PHI_L1)?,
-            real_energy_consumed_l1: measurements.f32_at(reg::REAL_ENERGY_CONSUMED_L1)?,
-            thd_current_l1: thd.f32_at(reg::THD_CURRENT_L1)?,
+            voltage: measurements.phases_at(reg::VOLTAGE_L1)?,
+            current: measurements.phases_at(reg::CURRENT_L1)?,
+            real_power: measurements.phases_at(reg::REAL_POWER_L1)?,
+            real_power_sum3: measurements.f32_at(reg::REAL_POWER_SUM3)?,
+            apparent_power: measurements.phases_at(reg::APPARENT_POWER_L1)?,
+            apparent_power_sum3: measurements.f32_at(reg::APPARENT_POWER_SUM3)?,
+            reactive_power: measurements.phases_at(reg::REACTIVE_POWER_L1)?,
+            reactive_power_sum3: measurements.f32_at(reg::REACTIVE_POWER_SUM3)?,
+            cos_phi: measurements.phases_at(reg::COS_PHI_L1)?,
+            real_energy_consumed: measurements.phases_at(reg::REAL_ENERGY_CONSUMED_L1)?,
+            thd_voltage: measurements.phases_at(reg::THD_VOLTAGE_L1)?,
+            thd_current: measurements.phases_at(reg::THD_CURRENT_L1)?,
         })
     }
 }
 
-// Register reading functions for the Umg605Pro device.
+// Register reading functions for the Umg605Pro device. Each costs one round trip, so
+// prefer `snapshot` when more than a single value is needed.
 impl Umg605ProClient {
 
     pub async fn voltage_l1(&mut self) -> Result<f32, ReadError> {
@@ -247,6 +299,11 @@ impl Umg605ProClient {
     /// Alias for real_power_l1
     pub async fn power_l1_n(&mut self) -> Result<f32, ReadError> {
         self.real_power_l1().await
+    }
+
+    /// The measured three-phase real power P1+P2+P3.
+    pub async fn real_power_sum3(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(reg::REAL_POWER_SUM3).await
     }
 
     pub async fn apparent_power_l1(&mut self) -> Result<f32, ReadError> {
@@ -267,6 +324,10 @@ impl Umg605ProClient {
 
     pub async fn real_energy_consumed_l1(&mut self) -> Result<f32, ReadError> {
         self.read_f32(reg::REAL_ENERGY_CONSUMED_L1).await
+    }
+
+    pub async fn thd_voltage_l1(&mut self) -> Result<f32, ReadError> {
+        self.read_f32(reg::THD_VOLTAGE_L1).await
     }
 
     pub async fn thd_current_l1(&mut self) -> Result<f32, ReadError> {
@@ -339,13 +400,75 @@ mod tests {
     }
 
     #[test]
-    fn measurement_block_length_fits_modbus_limit() {
+    fn decodes_all_three_phases_of_a_quantity() {
+        let mut registers = Vec::new();
+        for value in [230.0_f32, 231.0, 232.0] {
+            let (hi, lo) = encode_f32(value);
+            registers.push(hi);
+            registers.push(lo);
+        }
+        let block = RegisterBlock::new(reg::VOLTAGE_L1, registers);
+
         assert_eq!(
-            reg::MEASUREMENT_BLOCK_LEN,
-            reg::REAL_ENERGY_CONSUMED_L1 + 2 - reg::VOLTAGE_L1
+            block.phases_at(reg::VOLTAGE_L1).unwrap(),
+            [230.0, 231.0, 232.0]
         );
-        // Modbus TCP allows at most 125 registers per read request
-        assert!(reg::MEASUREMENT_BLOCK_LEN <= 125);
+    }
+
+    #[test]
+    fn phases_report_unavailable_values_as_nan() {
+        // An unconnected phase makes the meter report NaN, which must survive decoding
+        // rather than turning into an error or a zero.
+        let mut registers = Vec::new();
+        for value in [1.85_f32, f32::NAN, f32::NAN] {
+            let (hi, lo) = encode_f32(value);
+            registers.push(hi);
+            registers.push(lo);
+        }
+        let block = RegisterBlock::new(reg::THD_VOLTAGE_L1, registers);
+
+        let thd = block.phases_at(reg::THD_VOLTAGE_L1).unwrap();
+        assert_eq!(thd[0], 1.85);
+        assert!(thd[1].is_nan() && thd[2].is_nan());
+    }
+
+    #[test]
+    fn phases_outside_the_block_are_rejected() {
+        // Only L1 and L2 fit, so reading the quantity as three phases must fail.
+        let block = RegisterBlock::new(reg::VOLTAGE_L1, vec![0; 4]);
+        assert!(matches!(
+            block.phases_at(reg::VOLTAGE_L1),
+            Err(ReadError::DecodeError(_))
+        ));
+    }
+
+    #[test]
+    fn measurement_block_covers_every_snapshot_value_within_the_modbus_limit() {
+        // The block has to reach from the first voltage to the last THD register.
+        assert_eq!(reg::MEASUREMENT_BLOCK_START, reg::VOLTAGE_L1);
+        assert_eq!(reg::MEASUREMENT_BLOCK_LEN, 122);
+
+        let end = reg::MEASUREMENT_BLOCK_START + reg::MEASUREMENT_BLOCK_LEN;
+        for addr in [
+            reg::VOLTAGE_L1,
+            reg::CURRENT_L1,
+            reg::REAL_POWER_L1,
+            reg::REAL_POWER_SUM3,
+            reg::APPARENT_POWER_L1,
+            reg::APPARENT_POWER_SUM3,
+            reg::REACTIVE_POWER_L1,
+            reg::REACTIVE_POWER_SUM3,
+            reg::COS_PHI_L1,
+            reg::FREQUENCY,
+            reg::REAL_ENERGY_CONSUMED_L1,
+            reg::THD_VOLTAGE_L1,
+            reg::THD_CURRENT_L1,
+        ] {
+            let last_phase = addr + reg::PHASE_STRIDE * (PHASE_COUNT as u16 - 1);
+            assert!(
+                addr >= reg::MEASUREMENT_BLOCK_START && last_phase + 2 <= end,
+                "{addr} is not covered by the measurement block"
+            );
+        }
     }
 }
-
