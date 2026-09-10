@@ -351,3 +351,69 @@ async fn send_batch(
         Err(error) => eprintln!("Warning: sending the batch failed: {error}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_positional_server_argument_with_defaults() {
+        let args = Args::try_parse_from(["pq-meter-client", "192.168.1.42"]).unwrap();
+        assert_eq!(args.server_pos.as_deref(), Some("192.168.1.42"));
+        assert_eq!(args.server, None);
+        assert_eq!(args.path, "/edh/v1/hello");
+        assert_eq!(args.meter_port, DEFAULT_MODBUS_PORT);
+        assert_eq!(args.meter_unit, DEFAULT_MODBUS_UNIT);
+        assert_eq!(args.meter_timeout, DEFAULT_TIMEOUT_SECS);
+        assert_eq!(args.meter_interval_ms, DEFAULT_METER_INTERVAL_MS);
+        assert_eq!(args.batch_size, 10);
+        assert_eq!(args.batch_timeout_ms, 1000);
+    }
+
+    #[test]
+    fn parses_server_flag_and_aliases() {
+        let args = Args::try_parse_from([
+            "pq-meter-client",
+            "--server",
+            "10.0.0.1",
+            "--interval",
+            "50",
+            "--batch-time",
+            "500",
+            "--batch-size",
+            "25",
+        ])
+        .unwrap();
+        assert_eq!(args.server.as_deref(), Some("10.0.0.1"));
+        assert_eq!(args.meter_interval_ms, 50);
+        assert_eq!(args.batch_timeout_ms, 500);
+        assert_eq!(args.batch_size, 25);
+    }
+
+    #[test]
+    fn server_ip_alias_works() {
+        let args = Args::try_parse_from(["pq-meter-client", "--server-ip", "10.0.0.5"]).unwrap();
+        assert_eq!(args.server.as_deref(), Some("10.0.0.5"));
+    }
+
+    #[test]
+    fn rejects_missing_required_arguments_or_invalid_port() {
+        assert!(Args::try_parse_from(["pq-meter-client", "--meter-port", "invalid"]).is_err());
+    }
+
+    #[test]
+    fn derives_correct_scion_and_endhost_urls_from_ip() {
+        let ip_str = "127.0.0.1";
+        let ip: IpAddr = ip_str.parse().unwrap();
+        let scion_addr: ScionSocketIpAddr =
+            format!("[{SERVER_AS},{ip}]:{SERVER_PORT}").parse().unwrap();
+        assert_eq!(scion_addr.ip(), ip);
+        assert_eq!(scion_addr.port(), SERVER_PORT);
+
+        let endhost_api: Url = format!("http://{ip}:{GATEWAY_ENDHOST_API_PORT}/")
+            .parse()
+            .unwrap();
+        assert_eq!(endhost_api.as_str(), "http://127.0.0.1:31000/");
+    }
+}
+

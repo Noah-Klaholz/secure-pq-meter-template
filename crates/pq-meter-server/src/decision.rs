@@ -295,4 +295,113 @@ mod tests {
             DeviceChange::Removed(TEST_DEVICE)
         );
     }
+
+    #[test]
+    fn closest_match_returns_none_on_first_reading_or_zero_delta() {
+        let mut method = ClosestPowerMatch::new(5.0);
+
+        assert_eq!(method.decide(None, 100.0, TEST_CATALOG, &[]), DeviceChange::None);
+        assert_eq!(
+            method.decide(Some(100.0), 100.0, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+    }
+
+    #[test]
+    fn closest_match_picks_closest_device_among_multiple() {
+        const D1: Device = Device::new("d1", "Device 1", 50.0);
+        const D2: Device = Device::new("d2", "Device 2", 70.0);
+        let catalog = &[D1, D2];
+        let mut method = ClosestPowerMatch::new(10.0);
+
+        // Delta is 52.0 (closer to 50.0 than 70.0)
+        assert_eq!(
+            method.decide(Some(100.0), 152.0, catalog, &[]),
+            DeviceChange::Added(D1)
+        );
+        // Delta is 68.0 (closer to 70.0 than 50.0)
+        assert_eq!(
+            method.decide(Some(100.0), 168.0, catalog, &[]),
+            DeviceChange::Added(D2)
+        );
+    }
+
+    #[test]
+    fn closest_match_ignores_delta_exceeding_tolerance() {
+        let mut method = ClosestPowerMatch::new(5.0);
+        // Delta is 70.0, target is 60.0, diff 10.0 > tolerance 5.0
+        assert_eq!(
+            method.decide(Some(100.0), 170.0, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+        // Delta is 50.0, target is 60.0, diff 10.0 > tolerance 5.0
+        assert_eq!(
+            method.decide(Some(100.0), 150.0, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+    }
+
+    #[test]
+    fn closest_match_does_not_re_add_active_device_and_removes_it() {
+        let mut method = ClosestPowerMatch::new(5.0);
+
+        // Already active: should not be re-added even if delta matches
+        assert_eq!(
+            method.decide(Some(100.0), 160.0, TEST_CATALOG, &[TEST_DEVICE]),
+            DeviceChange::None
+        );
+
+        // Inactive: should not be removed even if negative delta matches
+        assert_eq!(
+            method.decide(Some(160.0), 100.0, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+
+        // Active: removed when negative delta matches
+        assert_eq!(
+            method.decide(Some(160.0), 100.0, TEST_CATALOG, &[TEST_DEVICE]),
+            DeviceChange::Removed(TEST_DEVICE)
+        );
+    }
+
+    #[test]
+    fn settled_match_resets_candidate_on_unstable_fluctuations() {
+        let mut method = SettledPowerMatch::new(5.0, 3.0, 3, 5.0);
+
+        // Baseline
+        assert_eq!(method.decide(None, 100.0, TEST_CATALOG, &[]), DeviceChange::None);
+
+        // Jump to 160 (reading 1)
+        assert_eq!(
+            method.decide(Some(100.0), 160.0, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+        // Reading 2 within +/- 3W
+        assert_eq!(
+            method.decide(Some(160.0), 162.0, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+        // Reading 3 jumps far away to 180 (exceeds settle_tolerance_watts 3.0), resets candidate!
+        assert_eq!(
+            method.decide(Some(162.0), 180.0, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+        // Reading 4 (now count 2 at ~180)
+        assert_eq!(
+            method.decide(Some(180.0), 181.0, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+        // Reading 5 (count 3 at ~180, settled delta = 80.33, TEST_DEVICE is 60W, tolerance 5W -> no match!)
+        assert_eq!(
+            method.decide(Some(181.0), 180.0, TEST_CATALOG, &[]),
+            DeviceChange::None
+        );
+    }
+
+    #[test]
+    fn contains_device_helper() {
+        assert!(!contains_device(&[], "test-device"));
+        assert!(contains_device(&[TEST_DEVICE], "test-device"));
+        assert!(!contains_device(&[TEST_DEVICE], "other-device"));
+    }
 }

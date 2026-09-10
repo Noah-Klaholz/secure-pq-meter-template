@@ -1,4 +1,7 @@
-.PHONY: run-server run-client client stop-client kill-client build-client-local build-client deploy-client build-pinger deploy-pinger
+.PHONY: test run-server run-client client stop-client kill-client build-client-local build-client deploy-client build-pinger deploy-pinger
+
+test:
+	cargo test --workspace
 
 OS := $(shell uname -s)
 

@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 clap = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "io-util", "net"] }
 tokio-modbus = { workspace = true }
 
 # Only required for the example binary, not the library itself.

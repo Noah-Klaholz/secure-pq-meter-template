@@ -69,6 +69,31 @@ mod tests {
     }
 
     #[test]
+    fn accepts_aliases_and_extra_fields() {
+        let decoder = DummyJsonDecoder;
+
+        assert_eq!(
+            decoder.decode_total_power(br#"{"power": 120.5}"#),
+            Ok(120.5)
+        );
+        assert_eq!(
+            decoder.decode_total_power(br#"{"power_watts": 45.0}"#),
+            Ok(45.0)
+        );
+        assert_eq!(
+            decoder.decode_total_power(br#"{"power_l1_n": 230.0}"#),
+            Ok(230.0)
+        );
+        assert_eq!(
+            decoder.decode_total_power(br#"{"total_power": 0.0}"#),
+            Ok(0.0)
+        );
+        // Payload with additional fields from pq-meter-client
+        let client_json = br#"{"total_power": 150.0, "systime": 123456, "l1": {"voltage_v": 230.0}}"#;
+        assert_eq!(decoder.decode_total_power(client_json), Ok(150.0));
+    }
+
+    #[test]
     fn rejects_invalid_power() {
         let decoder = DummyJsonDecoder;
 
@@ -79,8 +104,21 @@ mod tests {
         );
         assert!(
             decoder
+                .decode_total_power(br#"{"total_power": -0.1}"#)
+                .is_err()
+        );
+        assert!(
+            decoder
                 .decode_total_power(br#"{"message":"unknown"}"#)
                 .is_err()
         );
+        assert!(
+            decoder
+                .decode_total_power(br#"{"message":"-50"}"#)
+                .is_err()
+        );
+        assert!(decoder.decode_total_power(b"").is_err());
+        assert!(decoder.decode_total_power(b"not json").is_err());
+        assert!(decoder.decode_total_power(br#"{"total_power": "string"}"#).is_err());
     }
 }

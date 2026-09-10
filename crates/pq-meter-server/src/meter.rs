@@ -86,3 +86,59 @@ impl MeterState {
         change
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decision::{ClosestPowerMatch, DUMMY_DEVICE_CATALOG};
+
+    #[test]
+    fn initial_state_is_empty() {
+        let state = MeterState::new(DUMMY_DEVICE_CATALOG.to_vec());
+        assert_eq!(state.latest_power(), None);
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.readings_received, 0);
+        assert_eq!(snapshot.last_received_at, None);
+        assert_eq!(snapshot.last_change, None);
+        assert_eq!(snapshot.total_power_watts, None);
+        assert!(snapshot.active_devices.is_empty());
+        assert_eq!(snapshot.catalog.len(), DUMMY_DEVICE_CATALOG.len());
+    }
+
+    #[test]
+    fn apply_reading_tracks_power_and_increments_count() {
+        let mut state = MeterState::new(DUMMY_DEVICE_CATALOG.to_vec());
+        let mut method = ClosestPowerMatch::new(3.0);
+
+        state.apply_reading(100.0, &mut method);
+        assert_eq!(state.latest_power(), Some(100.0));
+        assert_eq!(state.snapshot().readings_received, 1);
+        assert!(state.snapshot().last_received_at.is_some());
+
+        state.apply_reading(150.0, &mut method);
+        assert_eq!(state.latest_power(), Some(150.0));
+        assert_eq!(state.snapshot().readings_received, 2);
+    }
+
+    #[test]
+    fn preserves_last_change_when_subsequent_reading_produces_no_change() {
+        let mut state = MeterState::new(DUMMY_DEVICE_CATALOG.to_vec());
+        let mut method = ClosestPowerMatch::new(3.0);
+
+        // Baseline (DeviceChange::None)
+        state.apply_reading(100.0, &mut method);
+        assert!(state.snapshot().last_change.is_none());
+
+        // Addition
+        let change = state.apply_reading(123.0, &mut method);
+        assert!(matches!(change, DeviceChange::Added(_)));
+        let added_at = state.snapshot().last_change.unwrap().1;
+
+        // No change reading: last_change timestamp and change must be preserved
+        state.apply_reading(123.0, &mut method);
+        let current_last_change = state.snapshot().last_change.unwrap();
+        assert_eq!(current_last_change.1, added_at);
+        assert_eq!(current_last_change.0, change);
+    }
+}
+

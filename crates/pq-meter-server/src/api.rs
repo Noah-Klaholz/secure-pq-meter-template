@@ -203,4 +203,39 @@ mod tests {
         );
         assert!(state.snapshot().active_devices.is_empty());
     }
+
+    #[tokio::test]
+    async fn returns_informative_response_messages_for_all_device_changes() {
+        let meter = Arc::new(Mutex::new(MeterState::new(DUMMY_DEVICE_CATALOG.to_vec())));
+        let state = AppState {
+            meter,
+            decision_method: Arc::new(Mutex::new(Box::new(ClosestPowerMatch::new(3.0)))),
+            reading_decoder: Arc::new(crate::input::DummyJsonDecoder),
+        };
+
+        // First reading: baseline
+        let (status, resp) = receive(State(state.clone()), Bytes::from(r#"{"total_power":100.0}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp, "baseline recorded at 100.0 W\n");
+
+        // Second reading: unchanged power -> no device state change
+        let (status, resp) = receive(State(state.clone()), Bytes::from(r#"{"total_power":100.0}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp, "no device state change\n");
+
+        // Third reading: add 23 W device
+        let (status, resp) = receive(State(state.clone()), Bytes::from(r#"{"total_power":123.0}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(resp.starts_with("added Baseline"));
+
+        // Fourth reading: remove 23 W device
+        let (status, resp) = receive(State(state.clone()), Bytes::from(r#"{"total_power":100.0}"#)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(resp.starts_with("removed Baseline"));
+
+        // Invalid reading
+        let (status, resp) = receive(State(state), Bytes::from(r#"{"message":"invalid"}"#)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(resp.contains("message must contain a power value"));
+    }
 }

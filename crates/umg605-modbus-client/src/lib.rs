@@ -136,6 +136,10 @@ pub struct RegisterBlock {
 }
 
 impl RegisterBlock {
+    pub fn new(start: u16, registers: Vec<u16>) -> Self {
+        Self { start, registers }
+    }
+
     /// The two registers holding the 32-bit value at `addr`.
     fn pair(&self, addr: u16) -> Result<(u16, u16), ReadError> {
         let offset = addr
@@ -184,7 +188,7 @@ pub mod reg {
 }
 
 /// One consistent set of readings taken from the meter.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Snapshot {
     pub systime: i32,
     pub frequency: f32,
@@ -273,3 +277,75 @@ impl Umg605ProClient {
         self.read_i32(reg::SYSTIME).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_f32(val: f32) -> (u16, u16) {
+        let bits = val.to_bits();
+        ((bits >> 16) as u16, (bits & 0xFFFF) as u16)
+    }
+
+    fn encode_i32(val: i32) -> (u16, u16) {
+        let bits = val as u32;
+        ((bits >> 16) as u16, (bits & 0xFFFF) as u16)
+    }
+
+    #[test]
+    fn decodes_f32_and_i32_from_register_block() {
+        let (f_hi, f_lo) = encode_f32(230.5);
+        let (i_hi, i_lo) = encode_i32(1_700_000_000);
+        let block = RegisterBlock::new(100, vec![f_hi, f_lo, i_hi, i_lo]);
+
+        assert_eq!(block.f32_at(100).unwrap(), 230.5);
+        assert_eq!(block.i32_at(102).unwrap(), 1_700_000_000);
+    }
+
+    #[test]
+    fn decodes_negative_and_zero_values() {
+        let (f_hi, f_lo) = encode_f32(-50.25);
+        let (i_hi, i_lo) = encode_i32(-42);
+        let (z_hi, z_lo) = encode_f32(0.0);
+        let block = RegisterBlock::new(0, vec![f_hi, f_lo, i_hi, i_lo, z_hi, z_lo]);
+
+        assert_eq!(block.f32_at(0).unwrap(), -50.25);
+        assert_eq!(block.i32_at(2).unwrap(), -42);
+        assert_eq!(block.f32_at(4).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn register_block_bounds_and_underflow_checks() {
+        let (f_hi, f_lo) = encode_f32(12.34);
+        let block = RegisterBlock::new(100, vec![f_hi, f_lo, 3, 4]);
+
+        // Address before start
+        assert!(matches!(block.f32_at(98), Err(ReadError::DecodeError(_))));
+        assert!(matches!(block.f32_at(99), Err(ReadError::DecodeError(_))));
+
+        // Valid addresses
+        assert_eq!(block.f32_at(100).unwrap(), 12.34);
+        assert!(block.f32_at(102).is_ok());
+
+        // Partial register at the end (103 is valid offset, but 104 is out of bounds)
+        assert!(matches!(block.f32_at(103), Err(ReadError::DecodeError(_))));
+
+        // Address past the end
+        assert!(matches!(block.f32_at(104), Err(ReadError::DecodeError(_))));
+        assert!(matches!(block.f32_at(200), Err(ReadError::DecodeError(_))));
+
+        // Underflow check: addr 0 when start is 100
+        assert!(matches!(block.f32_at(0), Err(ReadError::DecodeError(_))));
+    }
+
+    #[test]
+    fn measurement_block_length_fits_modbus_limit() {
+        assert_eq!(
+            reg::MEASUREMENT_BLOCK_LEN,
+            reg::REAL_ENERGY_CONSUMED_L1 + 2 - reg::VOLTAGE_L1
+        );
+        // Modbus TCP allows at most 125 registers per read request
+        assert!(reg::MEASUREMENT_BLOCK_LEN <= 125);
+    }
+}
+
