@@ -217,9 +217,10 @@ async fn full_e2e_pipeline_modbus_to_client_to_server_to_dashboard() {
     // 3. Setup server components
     let meter = Arc::new(Mutex::new(MeterState::new(DUMMY_DEVICE_CATALOG.to_vec())));
     // Settled matching: min change 5W, settle tolerance 3W, 2 stable readings, match tolerance 5W
-    let decision_method = Arc::new(Mutex::new(Box::new(SettledPowerMatch::new(
-        5.0, 3.0, 2, 5.0,
-    )) as Box<dyn crate::decision::DecisionMethod>));
+    let decision_method = Arc::new(Mutex::new(
+        Box::new(SettledPowerMatch::new(5.0, 3.0, 2, 5.0))
+            as Box<dyn crate::decision::DecisionMethod>,
+    ));
     let reading_decoder = Arc::new(JsonReadingDecoder);
 
     let app_state = AppState {
@@ -248,7 +249,8 @@ async fn full_e2e_pipeline_modbus_to_client_to_server_to_dashboard() {
         .unwrap();
     let resp = ingestion_app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_text = String::from_utf8(to_bytes(resp.into_body(), 1000).await.unwrap().to_vec()).unwrap();
+    let body_text =
+        String::from_utf8(to_bytes(resp.into_body(), 1000).await.unwrap().to_vec()).unwrap();
     assert_eq!(body_text, "baseline recorded at 100.0 W\n");
 
     // Verify dashboard reflects baseline
@@ -284,7 +286,8 @@ async fn full_e2e_pipeline_modbus_to_client_to_server_to_dashboard() {
         .unwrap();
     let resp = ingestion_app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_text = String::from_utf8(to_bytes(resp.into_body(), 1000).await.unwrap().to_vec()).unwrap();
+    let body_text =
+        String::from_utf8(to_bytes(resp.into_body(), 1000).await.unwrap().to_vec()).unwrap();
     assert!(body_text.starts_with("added Baseline"));
 
     // Verify dashboard reflects device addition
@@ -327,7 +330,8 @@ async fn full_e2e_pipeline_modbus_to_client_to_server_to_dashboard() {
         .unwrap();
     let resp = ingestion_app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_text = String::from_utf8(to_bytes(resp.into_body(), 1000).await.unwrap().to_vec()).unwrap();
+    let body_text =
+        String::from_utf8(to_bytes(resp.into_body(), 1000).await.unwrap().to_vec()).unwrap();
     assert!(body_text.starts_with("removed Baseline"));
 
     // Verify dashboard reflects device removal

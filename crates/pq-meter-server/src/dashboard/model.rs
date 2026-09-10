@@ -37,6 +37,12 @@ pub struct DeviceStatus {
     pub id: &'static str,
     pub name: &'static str,
     pub nominal_power_watts: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactive_power_var: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thd_current_pct: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cos_phi: Option<f32>,
     pub active: bool,
 }
 
@@ -46,6 +52,10 @@ pub struct Change {
     pub device_id: &'static str,
     pub device_name: &'static str,
     pub nominal_power_watts: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactive_power_var: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thd_current_pct: Option<f32>,
     pub received_at: String,
 }
 
@@ -77,6 +87,9 @@ impl SnapshotSource for LiveMeterSource {
                     id: device.id,
                     name: device.name,
                     nominal_power_watts: device.power_watts,
+                    reactive_power_var: device.reactive_power_var,
+                    thd_current_pct: device.thd_current_pct,
+                    cos_phi: device.cos_phi,
                     active: meter
                         .active_devices
                         .iter()
@@ -94,6 +107,8 @@ impl SnapshotSource for LiveMeterSource {
                     device_id: device.id,
                     device_name: device.name,
                     nominal_power_watts: device.power_watts,
+                    reactive_power_var: device.reactive_power_var,
+                    thd_current_pct: device.thd_current_pct,
                     received_at: time.to_rfc3339(),
                 })
             }),

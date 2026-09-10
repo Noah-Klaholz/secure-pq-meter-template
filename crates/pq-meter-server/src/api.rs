@@ -108,10 +108,24 @@ async fn receive(State(state): State<AppState>, body: Bytes) -> (StatusCode, Str
 fn reading_response(change: DeviceChange, was_first_reading: bool, total_power: f32) -> String {
     match change {
         DeviceChange::Added(device) => {
-            format!("added {} ({:.1} W)\n", device.name, device.power_watts)
+            if let (Some(q), Some(thd)) = (device.reactive_power_var, device.thd_current_pct) {
+                format!(
+                    "added {} ({:.1} W, {:+.1} var, {:.1}% THD)\n",
+                    device.name, device.power_watts, q, thd
+                )
+            } else {
+                format!("added {} ({:.1} W)\n", device.name, device.power_watts)
+            }
         }
         DeviceChange::Removed(device) => {
-            format!("removed {} ({:.1} W)\n", device.name, device.power_watts)
+            if let (Some(q), Some(thd)) = (device.reactive_power_var, device.thd_current_pct) {
+                format!(
+                    "removed {} ({:.1} W, {:+.1} var, {:.1}% THD)\n",
+                    device.name, device.power_watts, q, thd
+                )
+            } else {
+                format!("removed {} ({:.1} W)\n", device.name, device.power_watts)
+            }
         }
         DeviceChange::None if was_first_reading => {
             format!("baseline recorded at {total_power:.1} W\n")
@@ -336,7 +350,10 @@ mod tests {
         let state = test_state(Box::new(ClosestPowerMatch::new(3.0)));
         assert_eq!(
             post_json(state.clone(), serde_json::json!({"total_power": -1000.0})).await,
-            (StatusCode::OK, "baseline recorded at -1000.0 W\n".to_owned())
+            (
+                StatusCode::OK,
+                "baseline recorded at -1000.0 W\n".to_owned()
+            )
         );
 
         let (status, response) =
@@ -394,9 +411,12 @@ mod tests {
         assert_eq!(before.readings_received, 2);
         assert!(before.devices[0].active);
         assert_eq!(
-            receive(State(state), Bytes::from_static(br#"{"total_power":1e100}"#))
-                .await
-                .0,
+            receive(
+                State(state),
+                Bytes::from_static(br#"{"total_power":1e100}"#)
+            )
+            .await
+            .0,
             StatusCode::BAD_REQUEST
         );
         let after = source.snapshot().unwrap();
@@ -435,22 +455,38 @@ mod tests {
         };
 
         // First reading: baseline
-        let (status, resp) = receive(State(state.clone()), Bytes::from(r#"{"total_power":100.0}"#)).await;
+        let (status, resp) = receive(
+            State(state.clone()),
+            Bytes::from(r#"{"total_power":100.0}"#),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp, "baseline recorded at 100.0 W\n");
 
         // Second reading: unchanged power -> no device state change
-        let (status, resp) = receive(State(state.clone()), Bytes::from(r#"{"total_power":100.0}"#)).await;
+        let (status, resp) = receive(
+            State(state.clone()),
+            Bytes::from(r#"{"total_power":100.0}"#),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp, "no device state change\n");
 
         // Third reading: add 23 W device
-        let (status, resp) = receive(State(state.clone()), Bytes::from(r#"{"total_power":123.0}"#)).await;
+        let (status, resp) = receive(
+            State(state.clone()),
+            Bytes::from(r#"{"total_power":123.0}"#),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(resp.starts_with("added Baseline"));
 
         // Fourth reading: remove 23 W device
-        let (status, resp) = receive(State(state.clone()), Bytes::from(r#"{"total_power":100.0}"#)).await;
+        let (status, resp) = receive(
+            State(state.clone()),
+            Bytes::from(r#"{"total_power":100.0}"#),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(resp.starts_with("removed Baseline"));
 

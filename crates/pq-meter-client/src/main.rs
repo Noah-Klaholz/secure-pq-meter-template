@@ -97,7 +97,12 @@ struct Args {
     batch_size: usize,
 
     /// Maximum time to wait in milliseconds before sending a batch (time trigger).
-    #[arg(long, visible_alias = "batch-time", visible_alias = "batch-timeout", default_value_t = 1000)]
+    #[arg(
+        long,
+        visible_alias = "batch-time",
+        visible_alias = "batch-timeout",
+        default_value_t = 1000
+    )]
     batch_timeout_ms: u64,
 }
 
@@ -400,7 +405,9 @@ impl SettledMonitor {
         match self.candidate {
             Some(cand) if !cand.reading.exceeds_threshold(&current) => {
                 // Reading is stable with respect to the candidate level.
-                if now.checked_duration_since(cand.first_seen).unwrap_or_default()
+                if now
+                    .checked_duration_since(cand.first_seen)
+                    .unwrap_or_default()
                     >= self.settling_window
                 {
                     self.baseline = Some(current);
@@ -553,13 +560,19 @@ async fn send_batch(
                 Ok((text, _)) => {
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
-                        println!("Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}: {trimmed}");
+                        println!(
+                            "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}: {trimmed}"
+                        );
                     } else {
-                        println!("Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}");
+                        println!(
+                            "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}"
+                        );
                     }
                 }
                 Err(_) => {
-                    println!("Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}");
+                    println!(
+                        "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}"
+                    );
                 }
             }
         }
@@ -663,14 +676,14 @@ mod tests {
     fn ignores_small_noise_fluctuations() {
         let baseline = sample_reading();
         let noisy = BaselineReading {
-            frequency: 50.05,                    // delta 0.05 <= 0.2
-            voltage: [230.4, 0.0, 0.0],          // delta 0.4 <= 1.5
-            current: [1.02, 0.0, 0.0],           // delta 0.02 <= 0.06
-            real_power: [231.5, 0.0, 0.0],       // delta 1.5 <= 4.0
-            real_power_sum3: 231.5,              // delta 1.5 <= 12.0
-            apparent_power_sum3: 232.0,          // delta 2.0 <= 24.0
-            reactive_power_sum3: 0.8,            // delta 0.8 <= 9.0
-            cos_phi: [0.98, 1.0, 1.0],           // delta 0.02 <= 0.08
+            frequency: 50.05,                       // delta 0.05 <= 0.2
+            voltage: [230.4, 0.0, 0.0],             // delta 0.4 <= 1.5
+            current: [1.02, 0.0, 0.0],              // delta 0.02 <= 0.06
+            real_power: [231.5, 0.0, 0.0],          // delta 1.5 <= 4.0
+            real_power_sum3: 231.5,                 // delta 1.5 <= 12.0
+            apparent_power_sum3: 232.0,             // delta 2.0 <= 24.0
+            reactive_power_sum3: 0.8,               // delta 0.8 <= 9.0
+            cos_phi: [0.98, 1.0, 1.0],              // delta 0.02 <= 0.08
             thd_voltage: [1.9, f32::NAN, f32::NAN], // delta 0.4 <= 1.0
             thd_current: [4.5, f32::NAN, f32::NAN], // delta 3.0 <= 15.0
         };
@@ -892,7 +905,10 @@ mod tests {
         assert_eq!(measurement["frequency_hz"], json!(49.97_f32));
         assert_eq!(measurement["totals"]["real_power_w"], json!(25.6_f32));
         assert_eq!(measurement["totals"]["apparent_power_va"], json!(71.7_f32));
-        assert_eq!(measurement["totals"]["reactive_power_var"], json!(-36.59_f32));
+        assert_eq!(
+            measurement["totals"]["reactive_power_var"],
+            json!(-36.59_f32)
+        );
 
         for (phase, block) in ["l1", "l2", "l3"].into_iter().enumerate() {
             for (field, value) in [
@@ -902,7 +918,10 @@ mod tests {
                 ("apparent_power_va", snapshot.apparent_power[phase]),
                 ("reactive_power_var", snapshot.reactive_power[phase]),
                 ("cos_phi", snapshot.cos_phi[phase]),
-                ("real_energy_consumed_wh", snapshot.real_energy_consumed[phase]),
+                (
+                    "real_energy_consumed_wh",
+                    snapshot.real_energy_consumed[phase],
+                ),
             ] {
                 assert_eq!(measurement[block][field], json!(value), "{block}.{field}");
             }
@@ -948,7 +967,10 @@ mod tests {
         assert!(line.contains("L1 ["), "{line}");
         assert!(line.contains("L2 ["), "{line}");
         assert!(line.contains("L3 ["), "{line}");
-        assert!(line.contains("Sum3 [P: 25.60W, S: 71.70VA, Q: -36.59var]"), "{line}");
+        assert!(
+            line.contains("Sum3 [P: 25.60W, S: 71.70VA, Q: -36.59var]"),
+            "{line}"
+        );
         assert!(line.contains("THD_I: n/a%"), "{line}");
         assert!(line.contains("THD_I: 125.42%"), "{line}");
     }
