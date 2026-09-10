@@ -1,4 +1,4 @@
-.PHONY: run-server build-client deploy-client build-pinger deploy-pinger
+.PHONY: run-server run-client client stop-client kill-client build-client-local build-client deploy-client build-pinger deploy-pinger
 
 OS := $(shell uname -s)
 
@@ -9,6 +9,9 @@ else
 	# Linux: find interface starting with 'wl' and extract its IPv4 address
 	WLAN_IP := $(shell ip -o -4 addr list 2>/dev/null | awk '$$2 ~ /^wl/ {print $$4}' | cut -d/ -f1 | head -n1)
 endif
+
+# Default SERVER to current device IP; can be passed as an environment variable or make override
+SERVER ?= $(WLAN_IP)
 
 PI_USER ?= anapaya
 PI_HOST ?= 10.175.8.48
@@ -24,6 +27,31 @@ run-server:
 	fi
 	@echo "Starting server on WLAN IP: $(WLAN_IP)"
 	cargo run -p pq-meter-server -- --bind-ip $(WLAN_IP)
+
+run-client:
+	@if [ -z "$(SERVER)" ]; then \
+		echo "No SERVER IP address found. Please specify SERVER=<ip> or ensure Wi-Fi is connected."; \
+		exit 1; \
+	fi
+	@echo "Running client on $(PI_HOST) connecting to server: $(SERVER)"
+	@if [ -n "$(PI_PASS)" ] && command -v sshpass >/dev/null 2>&1; then \
+		sshpass -p '$(PI_PASS)' ssh -t $(PI_USER)@$(PI_HOST) "cd $(PI_DEST) && ./pq-meter-client --server $(SERVER)"; \
+	else \
+		if [ -n "$(PI_PASS)" ]; then echo "Warning: PI_PASS is set but 'sshpass' is not installed. Asking interactively..."; fi; \
+		ssh -t $(PI_USER)@$(PI_HOST) "cd $(PI_DEST) && ./pq-meter-client --server $(SERVER)"; \
+	fi
+
+client: run-client
+
+kill-client:
+	@echo "Stopping pq-meter-client on $(PI_HOST)..."
+	@if [ -n "$(PI_PASS)" ] && command -v sshpass >/dev/null 2>&1; then \
+		sshpass -p '$(PI_PASS)' ssh $(PI_USER)@$(PI_HOST) "pkill -INT -f pq-meter-client || killall -q -INT pq-meter-client || true"; \
+	else \
+		if [ -n "$(PI_PASS)" ]; then echo "Warning: PI_PASS is set but 'sshpass' is not installed. Asking interactively..."; fi; \
+		ssh $(PI_USER)@$(PI_HOST) "pkill -INT -f pq-meter-client || killall -q -INT pq-meter-client || true"; \
+	fi
+	@echo "Stopped."
 
 build-client-local:
 	@echo "Building client for the local machine..."
