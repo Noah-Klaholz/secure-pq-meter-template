@@ -8,7 +8,6 @@ hooks:
 		exit 1; \
 	}
 	pre-commit install
-	pre-commit install --hook-type pre-push
 	@echo "Hooks installed. Run them over the whole tree with: pre-commit run --all-files"
 
 # The checks CI runs, minus the test suite.

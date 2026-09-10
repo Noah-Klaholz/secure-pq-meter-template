@@ -556,18 +556,18 @@ Then install the hooks into your clone:
 make hooks
 ```
 
-That runs `pre-commit install` and `pre-commit install --hook-type pre-push`, which write
-`.git/hooks/pre-commit` and `.git/hooks/pre-push`. Hooks live in `.git/`, so this is per
-clone: everyone who clones the repository runs it once.
+That runs `pre-commit install`, which writes `.git/hooks/pre-commit`. Hooks live in
+`.git/`, so this is per clone: everyone who clones the repository runs it once.
 
 ### What runs when
 
-* **On `git commit`** — the file hygiene hooks over the staged files, then `cargo fmt
-  --check` and `cargo clippy` over the workspace whenever a `.rs` file is part of the
-  commit. The whitespace and line-ending hooks *fix* what they find and fail the commit;
-  re-stage the corrected files with `git add` and commit again.
-* **On `git push`** — `cargo test --workspace`. The suite is too slow to sit in front of
-  every commit, so it guards the push instead.
+Everything runs on `git commit`: the file hygiene hooks over the staged files, then `cargo
+fmt --check`, `cargo clippy` and `cargo test` over the workspace whenever a `.rs` file is
+part of the commit. The suite finishes in well under a second on an already-built
+workspace, so it is worth having in front of every commit rather than only the push.
+
+The whitespace and line-ending hooks *fix* what they find and fail the commit; re-stage
+the corrected files with `git add` and commit again.
 
 Useful commands:
 

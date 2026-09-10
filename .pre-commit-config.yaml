@@ -4,8 +4,7 @@
 # CI". The same hooks run in CI over every file, so a clean commit here is a green
 # pipeline there.
 
-# Without this, a hook that names no stage runs at every one of them, and `git push` would
-# repeat the whole commit-time suite before the tests.
+# Everything here runs at commit time; nothing is deferred to a push.
 default_stages: [pre-commit]
 
 repos:
@@ -14,8 +13,8 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      # These two ask upstream to run on push as well; the split below is the one this
-      # repository wants, so they are pinned back to commit time.
+      # These two ask upstream to run on push as well, which `default_stages` does not
+      # override, so they are pinned back to commit time explicitly.
       - id: trailing-whitespace
         stages: [pre-commit]
       - id: end-of-file-fixer
@@ -45,13 +44,11 @@ repos:
         types: [rust]
         pass_filenames: false
 
-      # The test suite is too slow to sit in front of every commit, so it guards the push
-      # instead. Installed by `pre-commit install --hook-type pre-push`, which `make
-      # hooks` does for you.
+      # The suite runs in well under a second once the workspace is built, which is the
+      # same cold/warm profile clippy above already has. No reason to defer it to a push.
       - id: cargo-test
         name: cargo test
         entry: cargo test --workspace
         language: system
         types: [rust]
         pass_filenames: false
-        stages: [pre-push]
