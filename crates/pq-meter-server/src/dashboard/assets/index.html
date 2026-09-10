@@ -30,15 +30,15 @@
         <div id="notice" class="notice" role="status">Connecting to the local receiver…</div>
         <noscript><p class="notice">Enable JavaScript to display live readings.</p></noscript>
         <div class="metrics">
-          <article class="metric primary"><p class="metric-label">Measured power <span aria-hidden="true">↗</span></p><p class="metric-value"><span id="total-power">—</span> <span class="unit">W</span></p><p class="metric-note">Latest accepted meter reading</p></article>
-          <article class="metric"><p class="metric-label">Inferred active devices</p><p class="metric-value"><span id="active-count">—</span><span id="catalog-count" class="unit"></span></p><p class="metric-note">Matched from changes in power</p></article>
+          <article class="metric primary"><p class="metric-label">Measured power <span aria-hidden="true">↗</span></p><p class="metric-value"><span id="total-power">—</span> <span class="unit">W</span></p><p class="metric-note" id="total-power-sub">Latest accepted meter reading</p></article>
+          <article class="metric"><p class="metric-label">Inferred active devices</p><p class="metric-value"><span id="active-count">—</span><span id="catalog-count" class="unit"></span></p><p class="metric-note">Matched from changes in power & PQ</p></article>
           <article class="metric"><p class="metric-label">Inferred nominal power</p><p class="metric-value"><span id="inferred-power">—</span> <span class="unit">W</span></p><p class="metric-note">Sum of active catalog values</p></article>
           <article class="metric"><p class="metric-label">Readings received</p><p class="metric-value" id="readings-count">—</p><p class="metric-note">Since this server started</p></article>
         </div>
         <div class="detail-grid">
           <article class="panel devices-panel">
-            <div class="panel-heading"><div><h2>Device activity</h2><p>Catalog matches from the decision engine</p></div><span id="device-summary" class="small-label">—</span></div>
-            <div class="table-wrap"><table><thead><tr><th scope="col">Device</th><th scope="col">Nominal power</th><th scope="col">Inferred state</th></tr></thead><tbody id="devices"><tr><td colspan="3" class="empty">Waiting for the receiver…</td></tr></tbody></table></div>
+            <div class="panel-heading"><div><h2>Device activity</h2><p>Multi-feature catalog matches from the decision engine</p></div><span id="device-summary" class="small-label">—</span></div>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Device</th><th scope="col">Nominal Profile (P, Q, THD)</th><th scope="col">Inferred state</th></tr></thead><tbody id="devices"><tr><td colspan="3" class="empty">Waiting for the receiver…</td></tr></tbody></table></div>
             <p class="panel-footnote">Device states are estimates. The initial reading establishes a baseline; devices already drawing power may not be identified.</p>
           </article>
           <div class="side-panels">

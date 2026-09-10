@@ -9,6 +9,12 @@ pub struct History<T> {
     entries: Vec<HistoryEntry<T>>,
 }
 
+impl<T> Default for History<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> History<T> {
     /// Creates an empty history.
     pub fn new() -> Self {
@@ -130,7 +136,10 @@ mod tests {
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
         );
 
-        assert_eq!(history.latest().expect("history should not be empty").data, measurement(200.0, 2));
+        assert_eq!(
+            history.latest().expect("history should not be empty").data,
+            measurement(200.0, 2)
+        );
     }
 
     #[test]

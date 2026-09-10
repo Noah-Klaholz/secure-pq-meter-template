@@ -34,9 +34,7 @@ async fn spawn_mock_modbus_server() -> (SocketAddr, tokio::task::JoinHandle<()>)
 
                     if fc != 3 {
                         // Return exception: illegal function
-                        let resp = [
-                            header[0], header[1], 0, 0, 0, 3, uid, fc | 0x80, 0x01,
-                        ];
+                        let resp = [header[0], header[1], 0, 0, 0, 3, uid, fc | 0x80, 0x01];
                         let _ = stream.write_all(&resp).await;
                         continue;
                     }
@@ -44,9 +42,7 @@ async fn spawn_mock_modbus_server() -> (SocketAddr, tokio::task::JoinHandle<()>)
                     // Special test addresses:
                     if start_addr == 9999 {
                         // Return exception: illegal data address
-                        let resp = [
-                            header[0], header[1], 0, 0, 0, 3, uid, 0x83, 0x02,
-                        ];
+                        let resp = [header[0], header[1], 0, 0, 0, 3, uid, 0x83, 0x02];
                         let _ = stream.write_all(&resp).await;
                         continue;
                     }
@@ -187,5 +183,8 @@ async fn handles_connection_failure() {
     // Attempting to connect to an unused port
     let dead_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
     let res = Umg605ProClient::connect_tcp(dead_addr, Slave(1), Duration::from_millis(100)).await;
-    assert!(matches!(res, Err(ConnectError::Connect(_)) | Err(ConnectError::Timeout(_, _))));
+    assert!(matches!(
+        res,
+        Err(ConnectError::Connect(_)) | Err(ConnectError::Timeout(_, _))
+    ));
 }

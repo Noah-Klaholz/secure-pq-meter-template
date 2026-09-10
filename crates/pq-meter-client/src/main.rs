@@ -97,7 +97,12 @@ struct Args {
     batch_size: usize,
 
     /// Maximum time to wait in milliseconds before sending a batch (time trigger).
-    #[arg(long, visible_alias = "batch-time", visible_alias = "batch-timeout", default_value_t = 1000)]
+    #[arg(
+        long,
+        visible_alias = "batch-time",
+        visible_alias = "batch-timeout",
+        default_value_t = 1000
+    )]
     batch_timeout_ms: u64,
 }
 
@@ -265,7 +270,9 @@ impl SettledMonitor {
         match self.candidate {
             Some(cand) if !cand.reading.exceeds_threshold(&current) => {
                 // Reading is stable with respect to the candidate level.
-                if now.checked_duration_since(cand.first_seen).unwrap_or_default()
+                if now
+                    .checked_duration_since(cand.first_seen)
+                    .unwrap_or_default()
                     >= self.settling_window
                 {
                     self.baseline = Some(current);
@@ -457,13 +464,19 @@ async fn send_batch(
                 Ok((text, _)) => {
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
-                        println!("Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}: {trimmed}");
+                        println!(
+                            "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}: {trimmed}"
+                        );
                     } else {
-                        println!("Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}");
+                        println!(
+                            "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}"
+                        );
                     }
                 }
                 Err(_) => {
-                    println!("Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}");
+                    println!(
+                        "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}"
+                    );
                 }
             }
         }
@@ -553,15 +566,15 @@ mod tests {
     fn ignores_small_noise_fluctuations() {
         let baseline = sample_reading();
         let noisy = BaselineReading {
-            frequency: 50.05,              // delta 0.05 <= 0.2
-            voltage_l1: 230.4,             // delta 0.4 <= 1.0
-            current_l1: 1.02,              // delta 0.02 <= 0.05
-            real_power_l1: 231.5,          // delta 1.5 <= 3.0
-            apparent_power_l1: 232.0,      // delta 2.0 <= 5.0
-            reactive_power_l1: 0.8,        // delta 0.8 <= 2.0
-            cos_phi_l1: 0.98,              // delta 0.02 <= 0.05
+            frequency: 50.05,               // delta 0.05 <= 0.2
+            voltage_l1: 230.4,              // delta 0.4 <= 1.0
+            current_l1: 1.02,               // delta 0.02 <= 0.05
+            real_power_l1: 231.5,           // delta 1.5 <= 3.0
+            apparent_power_l1: 232.0,       // delta 2.0 <= 5.0
+            reactive_power_l1: 0.8,         // delta 0.8 <= 2.0
+            cos_phi_l1: 0.98,               // delta 0.02 <= 0.05
             real_energy_consumed_l1: 105.0, // ignored for state changes
-            thd_current_l1: 4.5,           // delta 3.0 <= 10.0
+            thd_current_l1: 4.5,            // delta 3.0 <= 10.0
         };
         assert!(!baseline.exceeds_threshold(&noisy));
     }

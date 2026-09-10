@@ -62,9 +62,9 @@ impl MeterState {
         reading: MeterReading,
         decision_method: &mut dyn DecisionMethod,
     ) -> DeviceChange {
-        let change = decision_method.decide(
-            self.latest_power(),
-            reading.total_power,
+        let change = decision_method.decide_reading(
+            self.latest_reading.as_ref(),
+            &reading,
             &self.catalog,
             &self.active_devices,
         );
@@ -144,4 +144,3 @@ mod tests {
         assert_eq!(current_last_change.0, change);
     }
 }
-

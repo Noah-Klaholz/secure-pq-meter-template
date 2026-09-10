@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use tokio_modbus::Slave;
-use umg605_modbus_client::{Umg605ProClient, DEFAULT_MODBUS_PORT};
+use umg605_modbus_client::{DEFAULT_MODBUS_PORT, Umg605ProClient};
 
 /// Unit id for a directly addressed Modbus TCP device, per the Modbus TCP spec.
 const DEFAULT_MODBUS_UNIT: u8 = 1;
@@ -16,7 +16,10 @@ const DEFAULT_TIMEOUT_SECS: u64 = 5;
 const MONITOR_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(clap::Parser)]
-#[command(version, about = "Read measured values from a Janitza UMG 605-PRO via Modbus TCP")]
+#[command(
+    version,
+    about = "Read measured values from a Janitza UMG 605-PRO via Modbus TCP"
+)]
 struct Cli {
     /// The IP address of the Umg605Pro device.
     #[arg(short, long)]
@@ -75,7 +78,11 @@ async fn monitor(client: &mut Umg605ProClient, period: Duration) -> anyhow::Resu
         if elapsed3 > period {
             eprintln!(
                 "Warning: Reading values took longer than the {:.2?} interval: {:.2?} + {:.2?} + {:.2?} = {:.2?}",
-                period, elapsed1, elapsed2 - elapsed1, elapsed3 - elapsed2, elapsed3
+                period,
+                elapsed1,
+                elapsed2 - elapsed1,
+                elapsed3 - elapsed2,
+                elapsed3
             );
         }
 

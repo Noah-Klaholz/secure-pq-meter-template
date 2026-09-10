@@ -67,6 +67,8 @@ enum DecisionMethodArg {
     Settled,
     /// Decide immediately from each change relative to the previous reading.
     Immediate,
+    /// Multi-feature P-Q-THD fingerprint matching with settled readings.
+    MultiFeature,
 }
 
 #[tokio::main]
@@ -129,6 +131,9 @@ async fn main() -> anyhow::Result<()> {
             5.0, // Maximum difference between the settled delta and table value.
         )),
         DecisionMethodArg::Immediate => Box::new(decision::ClosestPowerMatch::new(5.0)),
+        DecisionMethodArg::MultiFeature => Box::new(
+            decision::SettledPowerMatch::with_pq_tolerances(5.0, 3.0, 3, 5.0, 10.0, 20.0),
+        ),
     };
     let decision_method: api::SharedDecisionMethod = Arc::new(Mutex::new(decision_method));
     let reading_decoder: input::SharedReadingDecoder = Arc::new(input::JsonReadingDecoder);
@@ -150,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
         decision_method: match args.decision_method {
             DecisionMethodArg::Settled => "settled",
             DecisionMethodArg::Immediate => "immediate",
+            DecisionMethodArg::MultiFeature => "multi-feature",
         },
     });
     let receiver = api::serve(

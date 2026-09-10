@@ -1,17 +1,17 @@
 //! A Basic Modbus client for the Umg605Pro device.
-//! 
+//!
 //! See [Modbus register map] for the list of registers that can be read from the device.
-//! 
+//!
 //! For more information about the Umg605Pro device, see the [official documentation](https://www.janitza.com/en/products/umg-605-pro/downloads).
-//! 
+//!
 //! [Modbus register map]: https://assets.janitza.com/ce18jq9ih0x6/b83ae2356a42a682591109/ef2bc2b24a6b7c77de4dbda20e43cebf/janitza-mal-umg605pro-en.pdf
 
 use std::borrow::Cow;
-use std::net::{SocketAddr};
-use std::time::{Duration};
+use std::net::SocketAddr;
+use std::time::Duration;
 
-use tokio_modbus::client::Reader;
 use tokio_modbus::Slave;
+use tokio_modbus::client::Reader;
 
 /// Default Modbus TCP port
 pub const DEFAULT_MODBUS_PORT: u16 = 502;
@@ -33,7 +33,7 @@ pub enum ConnectError {
 
 impl Umg605ProClient {
     /// Creates a new instance of the Umg605ProClient over TCP Modbus.
-    /// 
+    ///
     /// ### Parameters
     /// * `socket_addr` is the IP address and port of the Umg605Pro device.
     /// * `unit` is the Modbus unit id configured on the meter. For TCP Modbus, this can usually be set to 1.
@@ -48,8 +48,8 @@ impl Umg605ProClient {
             tokio_modbus::client::tcp::connect_slave(socket_addr, unit),
         )
         .await
-            .map_err(|_| ConnectError::Timeout(socket_addr, timeout))?
-            .map_err(ConnectError::Connect)?;
+        .map_err(|_| ConnectError::Timeout(socket_addr, timeout))?
+        .map_err(ConnectError::Connect)?;
 
         Ok(Umg605ProClient {
             client: modbus_context,
@@ -57,7 +57,6 @@ impl Umg605ProClient {
         })
     }
 }
-
 
 #[derive(thiserror::Error, Debug)]
 pub enum ReadError {
@@ -74,19 +73,24 @@ pub enum ReadError {
 }
 
 impl Umg605ProClient {
-
     /// Reads `count` holding registers, returning a vector of `u16` values.
-    pub async fn read_holding_registers(&mut self, addr: u16, count: u16) -> Result<Vec<u16>, ReadError> {
-        tokio::time::timeout(self.timeout, self.client.read_holding_registers(addr, count))
-            .await
-            .map_err(|_| ReadError::Timeout(self.timeout))?
-            .map_err(|e| match e {
-                tokio_modbus::Error::Protocol(protocol_error) => ReadError::Protocol(protocol_error),
-                tokio_modbus::Error::Transport(error) => ReadError::Transport(error),
-            })?
-            .map_err(ReadError::ModbusException)
+    pub async fn read_holding_registers(
+        &mut self,
+        addr: u16,
+        count: u16,
+    ) -> Result<Vec<u16>, ReadError> {
+        tokio::time::timeout(
+            self.timeout,
+            self.client.read_holding_registers(addr, count),
+        )
+        .await
+        .map_err(|_| ReadError::Timeout(self.timeout))?
+        .map_err(|e| match e {
+            tokio_modbus::Error::Protocol(protocol_error) => ReadError::Protocol(protocol_error),
+            tokio_modbus::Error::Transport(error) => ReadError::Transport(error),
+        })?
+        .map_err(ReadError::ModbusException)
     }
-
 
     /// Reads a float32 value spanning the two holding registers starting at `addr`.
     pub async fn read_f32(&mut self, addr: u16) -> Result<f32, ReadError> {
@@ -231,7 +235,6 @@ impl Umg605ProClient {
 
 // Register reading functions for the Umg605Pro device.
 impl Umg605ProClient {
-
     pub async fn voltage_l1(&mut self) -> Result<f32, ReadError> {
         self.read_f32(reg::VOLTAGE_L1).await
     }
@@ -345,7 +348,6 @@ mod tests {
             reg::REAL_ENERGY_CONSUMED_L1 + 2 - reg::VOLTAGE_L1
         );
         // Modbus TCP allows at most 125 registers per read request
-        assert!(reg::MEASUREMENT_BLOCK_LEN <= 125);
+        const { assert!(reg::MEASUREMENT_BLOCK_LEN <= 125) };
     }
 }
-

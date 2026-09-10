@@ -21,9 +21,17 @@ export function createOverview() {
       text('inferred-power', hasReading ? watts(snapshot.inferred_power_watts) : '—');
       text('readings-count', integer.format(snapshot.readings_received));
       text('device-summary', `${snapshot.devices.length} catalog entries`);
-      text('method', snapshot.decision_method === 'settled' ? 'Settled power match' : 'Immediate power match');
+      text('method', snapshot.decision_method === 'settled' ? 'Settled power match' : snapshot.decision_method === 'multi-feature' ? 'Multi-feature PQ match (P-Q-THD)' : 'Immediate power match');
       text('last-reading', snapshot.last_received_at ? time.format(new Date(snapshot.last_received_at)) : 'No readings yet');
       text('last-sync', `Synchronized ${time.format(new Date(snapshot.generated_at))}`);
+
+      if (snapshot.latest_reading?.l1) {
+        const l1 = snapshot.latest_reading.l1;
+        const qSign = l1.reactive_power_var > 0 ? '+' : '';
+        text('total-power-sub', `Q: ${qSign}${watts(l1.reactive_power_var)} var · THD: ${watts(l1.thd_current_pct)}% · cos φ: ${number.format(l1.cos_phi)}`);
+      } else {
+        text('total-power-sub', 'Latest accepted meter reading');
+      }
 
       const signature = JSON.stringify([hasReading, snapshot.devices]);
       if (signature !== deviceSignature) {
@@ -37,7 +45,14 @@ export function createOverview() {
           id.textContent = device.id;
           name.append(id);
           const power = document.createElement('td');
-          power.textContent = `${watts(device.nominal_power_watts)} W`;
+          if (device.reactive_power_var != null || device.thd_current_pct != null) {
+            const pqParts = [];
+            if (device.reactive_power_var != null) pqParts.push(`${device.reactive_power_var > 0 ? '+' : ''}${watts(device.reactive_power_var)} var`);
+            if (device.thd_current_pct != null) pqParts.push(`${watts(device.thd_current_pct)}% THD`);
+            power.innerHTML = `${watts(device.nominal_power_watts)} W <span style="display:block;font-size:0.82em;color:var(--muted);margin-top:2px;">${pqParts.join(' · ')}</span>`;
+          } else {
+            power.textContent = `${watts(device.nominal_power_watts)} W`;
+          }
           const state = document.createElement('td');
           const status = document.createElement('span');
           badge(status, !hasReading ? 'Awaiting data' : device.active ? 'Active' : 'Not detected', device.active ? 'positive' : 'neutral');
@@ -60,7 +75,11 @@ export function createOverview() {
       const change = snapshot.last_change;
       badge(document.getElementById('change-kind'), change ? (change.kind === 'added' ? 'Device added' : 'Device removed') : 'No change yet', change?.kind === 'added' ? 'positive' : 'neutral');
       text('change-device', change ? change.device_name : 'Waiting for a match');
-      text('change-detail', change ? `${watts(change.nominal_power_watts)} W nominal power · ${change.kind === 'added' ? 'Inferred active' : 'No longer detected'}` : 'Detected additions and removals will appear here.');
+      const pqChangeParts = [];
+      if (change?.reactive_power_var != null) pqChangeParts.push(`${change.reactive_power_var > 0 ? '+' : ''}${watts(change.reactive_power_var)} var`);
+      if (change?.thd_current_pct != null) pqChangeParts.push(`${watts(change.thd_current_pct)}% THD`);
+      const pqDetail = pqChangeParts.length ? ` (${pqChangeParts.join(', ')})` : '';
+      text('change-detail', change ? `${watts(change.nominal_power_watts)} W${pqDetail} nominal power · ${change.kind === 'added' ? 'Inferred active' : 'No longer detected'}` : 'Detected additions and removals will appear here.');
       text('change-time', change ? new Date(change.received_at).toLocaleString() : '—');
     },
     connection(snapshot, error, elapsedSinceFetch = 0) {
