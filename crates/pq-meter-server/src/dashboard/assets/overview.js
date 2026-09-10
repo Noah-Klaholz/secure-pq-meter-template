@@ -212,7 +212,7 @@ export function createOverview() {
       text('catalog-count', ` / ${snapshot.devices.length}`);
       text('inferred-power', hasReading ? number.format(snapshot.inferred_power_watts === 0 ? 0 : snapshot.inferred_power_watts) : '—');
       text('device-summary', `${snapshot.devices.length} catalog entries`);
-      text('method', snapshot.decision_method === 'settled' ? 'Settled power match' : snapshot.decision_method === 'multi-feature' ? 'Multi-feature PQ match (P-Q-THD)' : 'Immediate power match');
+      text('method', snapshot.decision_method === 'settled' ? 'Settled power match' : snapshot.decision_method === 'multi-feature' ? 'Multi-feature PQ match (P-Q-THD)' : snapshot.decision_method === 'adaptive' ? 'Adaptive NILM · runtime learning' : 'Immediate power match');
 
       const signature = JSON.stringify([hasReading, snapshot.devices]);
       if (signature !== deviceSignature) {

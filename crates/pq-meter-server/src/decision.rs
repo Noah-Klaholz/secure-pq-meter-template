@@ -120,7 +120,20 @@ pub trait DecisionMethod: Send + Sync {
         catalog: &[Device],
         active_devices: &[Device],
     ) -> DeviceChange;
+
+    /// Devices discovered at runtime that should appear in the live catalog.
+    ///
+    /// Static-catalog methods keep the default (empty). [`AdaptiveNilm`] returns the
+    /// learned background load plus every appliance it has fingerprinted so far, with
+    /// up-to-date signatures, so the dashboard reflects them as soon as they are seen.
+    fn learned_devices(&self) -> Vec<Device> {
+        Vec::new()
+    }
 }
+
+/// Identifier of the synthetic, always-on device that represents the idle background
+/// load (for this deployment, the two permanently connected Raspberry Pis).
+pub const BACKGROUND_ID: &str = "background";
 
 /// Immediately selects the device closest in (P, Q, THD) space to the change from the previous reading.
 pub struct ClosestPowerMatch {
@@ -471,6 +484,326 @@ pub fn match_pq_delta(
 
 pub fn contains_device(devices: &[Device], id: &str) -> bool {
     devices.iter().any(|device| device.id == id)
+}
+
+/// A point in the load-signature space: real power, reactive power, and the
+/// distortion current implied by THD_I (`I_rms * THD / 100`).
+///
+/// These three quantities are, unlike a raw THD percentage, approximately additive
+/// across parallel loads. That additivity is what lets [`AdaptiveNilm`] subtract a
+/// running reference from each settled reading and treat the remainder as one
+/// appliance's contribution.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Signature {
+    /// Real power, W.
+    p: f32,
+    /// Reactive power, var (sign preserved: leading is negative on this meter).
+    q: f32,
+    /// Distortion (harmonic) current, A.
+    idist: f32,
+}
+
+impl Signature {
+    fn from_reading(reading: &MeterReading) -> Self {
+        // Each L1 quantity is individually optional; a missing axis degrades to zero
+        // so the method still tracks power-only, just with less to disambiguate on.
+        let l1 = reading.l1;
+        let q = l1.and_then(|l1| l1.reactive_power_var).unwrap_or(0.0);
+        let idist = l1
+            .and_then(|l1| Some((l1.current_a? * l1.thd_current_pct? / 100.0).abs()))
+            .unwrap_or(0.0);
+        Self {
+            p: reading.total_power,
+            q,
+            idist,
+        }
+    }
+
+    /// This signature relative to `base`, component-wise.
+    fn delta(self, base: Signature) -> Signature {
+        Signature {
+            p: self.p - base.p,
+            q: self.q - base.q,
+            idist: self.idist - base.idist,
+        }
+    }
+
+    fn negated(self) -> Signature {
+        Signature {
+            p: -self.p,
+            q: -self.q,
+            idist: -self.idist,
+        }
+    }
+
+    /// Running-mean update toward `sample` for the `n`-th sample (`n >= 1`).
+    fn accumulate(self, sample: Signature, n: usize) -> Signature {
+        let k = n as f32;
+        Signature {
+            p: self.p + (sample.p - self.p) / k,
+            q: self.q + (sample.q - self.q) / k,
+            idist: self.idist + (sample.idist - self.idist) / k,
+        }
+    }
+
+    /// Exponential update toward `sample` with weight `alpha`.
+    fn blended(self, sample: Signature, alpha: f32) -> Signature {
+        Signature {
+            p: self.p + alpha * (sample.p - self.p),
+            q: self.q + alpha * (sample.q - self.q),
+            idist: self.idist + alpha * (sample.idist - self.idist),
+        }
+    }
+
+    /// Euclidean distance to `other` with each axis divided by `scale`.
+    fn distance(self, other: Signature, scale: Signature) -> f32 {
+        let dp = (self.p - other.p) / scale.p;
+        let dq = (self.q - other.q) / scale.q;
+        let di = (self.idist - other.idist) / scale.idist;
+        (dp * dp + dq * dq + di * di).sqrt()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SettlingLevel {
+    signature: Signature,
+    samples: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LearnedAppliance {
+    id: &'static str,
+    name: &'static str,
+    /// The turn-on edge: the signature delta observed when this appliance switched on.
+    edge: Signature,
+}
+
+/// Training-free online NILM that learns appliances at runtime instead of matching
+/// against a predefined catalog.
+///
+/// The first accepted reading is taken as the always-on **background** (here, the two
+/// permanently connected Raspberry Pis) and is never reported as an event. After that,
+/// every *settled* step change is an **edge** in `(dP, dQ, dI_dist)` space. An edge is
+/// matched by normalised nearest-neighbour distance to a previously learned appliance;
+/// an unmatched turn-on mints a new one (`Device N`).
+///
+/// This is Hart's residential load-monitoring approach (P–Q signature clustering),
+/// extended with a distortion-current axis and adapted to the gateway's
+/// already-settled, roughly one-sample-per-event stream — hence `required_samples`
+/// defaults to 1 and the method trusts the client's settling window.
+pub struct AdaptiveNilm {
+    background: Option<Signature>,
+    /// Last settled absolute operating point; edges are measured against this.
+    reference: Option<Signature>,
+    settling: Option<SettlingLevel>,
+    appliances: Vec<LearnedAppliance>,
+    /// Monotonic mint counter, for stable naming.
+    minted: usize,
+    required_samples: usize,
+    settle_tolerance_watts: f32,
+    min_edge_watts: f32,
+    gate_distance: f32,
+    max_appliances: usize,
+    scale: Signature,
+}
+
+impl Default for AdaptiveNilm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AdaptiveNilm {
+    pub fn new() -> Self {
+        Self {
+            background: None,
+            reference: None,
+            settling: None,
+            appliances: Vec::new(),
+            minted: 0,
+            required_samples: 1,
+            settle_tolerance_watts: 6.0,
+            min_edge_watts: 8.0,
+            gate_distance: 1.8,
+            max_appliances: 32,
+            scale: Signature {
+                p: 18.0,
+                q: 18.0,
+                idist: 0.25,
+            },
+        }
+    }
+
+    /// Tuning hook for tests and future CLI flags.
+    #[allow(dead_code)]
+    pub fn with_params(
+        required_samples: usize,
+        settle_tolerance_watts: f32,
+        min_edge_watts: f32,
+        gate_distance: f32,
+        max_appliances: usize,
+    ) -> Self {
+        Self {
+            required_samples: required_samples.max(1),
+            settle_tolerance_watts: settle_tolerance_watts.max(0.0),
+            min_edge_watts: min_edge_watts.max(0.0),
+            gate_distance: gate_distance.max(0.0),
+            max_appliances,
+            ..Self::new()
+        }
+    }
+
+    fn background_device(signature: Signature) -> Device {
+        Device {
+            id: BACKGROUND_ID,
+            name: "Background (idle)",
+            power_watts: signature.p.max(0.0),
+            reactive_power_var: Some(signature.q),
+            thd_current_pct: None,
+            cos_phi: None,
+        }
+    }
+
+    fn appliance_device(appliance: &LearnedAppliance) -> Device {
+        Device {
+            id: appliance.id,
+            name: appliance.name,
+            power_watts: appliance.edge.p.abs(),
+            reactive_power_var: Some(appliance.edge.q),
+            thd_current_pct: None,
+            cos_phi: None,
+        }
+    }
+
+    /// Registers a new appliance for `edge` and returns its index.
+    ///
+    /// Ids and names outlive the method by design: the learned set is bounded by
+    /// `max_appliances`, and the server runs for the length of one session.
+    fn mint(&mut self, edge: Signature) -> usize {
+        self.minted += 1;
+        let watts = edge.p.round().max(0.0) as i32;
+        let id: &'static str = Box::leak(format!("learned-{}", self.minted).into_boxed_str());
+        let name: &'static str =
+            Box::leak(format!("Device {} (~{} W)", self.minted, watts).into_boxed_str());
+        self.appliances.push(LearnedAppliance { id, name, edge });
+        self.appliances.len() - 1
+    }
+
+    fn match_turn_on(&mut self, edge: Signature, active: &[Device]) -> DeviceChange {
+        let nearest_inactive = self
+            .appliances
+            .iter()
+            .enumerate()
+            .filter(|(_, appliance)| !contains_device(active, appliance.id))
+            .map(|(index, appliance)| (index, edge.distance(appliance.edge, self.scale)))
+            .min_by(|left, right| left.1.total_cmp(&right.1));
+
+        if let Some((index, distance)) = nearest_inactive
+            && distance <= self.gate_distance
+        {
+            return DeviceChange::Added(Self::appliance_device(&self.appliances[index]));
+        }
+
+        if self.appliances.len() >= self.max_appliances {
+            return DeviceChange::None;
+        }
+        let index = self.mint(edge);
+        DeviceChange::Added(Self::appliance_device(&self.appliances[index]))
+    }
+
+    fn match_turn_off(&mut self, edge: Signature, active: &[Device]) -> DeviceChange {
+        let target = edge.negated();
+        let nearest_active = self
+            .appliances
+            .iter()
+            .enumerate()
+            .filter(|(_, appliance)| contains_device(active, appliance.id))
+            .map(|(index, appliance)| (index, target.distance(appliance.edge, self.scale)))
+            .min_by(|left, right| left.1.total_cmp(&right.1));
+
+        match nearest_active {
+            Some((index, distance)) if distance <= self.gate_distance => {
+                DeviceChange::Removed(Self::appliance_device(&self.appliances[index]))
+            }
+            // A negative edge that matches nothing active is left unexplained rather
+            // than forcing a removal; the reference still advances to the new level.
+            _ => DeviceChange::None,
+        }
+    }
+}
+
+impl DecisionMethod for AdaptiveNilm {
+    fn decide_reading(
+        &mut self,
+        _previous: Option<&MeterReading>,
+        current: &MeterReading,
+        _catalog: &[Device],
+        active_devices: &[Device],
+    ) -> DeviceChange {
+        let sample = Signature::from_reading(current);
+
+        let Some(reference) = self.reference else {
+            // First reading defines the always-on background.
+            self.background = Some(sample);
+            self.reference = Some(sample);
+            return DeviceChange::Added(Self::background_device(sample));
+        };
+
+        // Close to the running reference: steady state. Drop any settling candidate and
+        // let the background drift slowly while nothing but the background is on.
+        if (sample.p - reference.p).abs() < self.min_edge_watts {
+            self.settling = None;
+            let only_background = active_devices
+                .iter()
+                .all(|device| device.id == BACKGROUND_ID);
+            if only_background {
+                self.reference = Some(reference.blended(sample, 0.05));
+                if let Some(background) = self.background {
+                    self.background = Some(background.blended(sample, 0.05));
+                }
+            }
+            return DeviceChange::None;
+        }
+
+        // Accumulate a settled level at the new operating point.
+        self.settling = match self.settling {
+            Some(level) if (sample.p - level.signature.p).abs() <= self.settle_tolerance_watts => {
+                let samples = level.samples + 1;
+                Some(SettlingLevel {
+                    signature: level.signature.accumulate(sample, samples),
+                    samples,
+                })
+            }
+            _ => Some(SettlingLevel {
+                signature: sample,
+                samples: 1,
+            }),
+        };
+
+        let level = self.settling.expect("settling level was just set");
+        if level.samples < self.required_samples {
+            return DeviceChange::None;
+        }
+        self.settling = None;
+
+        let edge = level.signature.delta(reference);
+        self.reference = Some(level.signature);
+
+        if edge.p >= 0.0 {
+            self.match_turn_on(edge, active_devices)
+        } else {
+            self.match_turn_off(edge, active_devices)
+        }
+    }
+
+    fn learned_devices(&self) -> Vec<Device> {
+        let mut devices = Vec::with_capacity(self.appliances.len() + 1);
+        if let Some(background) = self.background {
+            devices.push(Self::background_device(background));
+        }
+        devices.extend(self.appliances.iter().map(Self::appliance_device));
+        devices
+    }
 }
 
 #[cfg(test)]
@@ -994,5 +1327,90 @@ mod tests {
             &active,
         );
         assert_eq!(change_off, DeviceChange::Removed(DUMMY_DEVICE_CATALOG[5]));
+    }
+
+    #[test]
+    fn adaptive_learns_background_and_ignores_idle_noise() {
+        use crate::meter::MeterState;
+        let mut method = AdaptiveNilm::new();
+        let mut meter = MeterState::new(Vec::new());
+
+        // Idle: two Raspberry Pis, ~23 W, leading Q, huge THD at the low idle current.
+        let change = meter.apply_reading(make_reading(23.0, -34.0, 130.0), &mut method);
+        assert!(matches!(change, DeviceChange::Added(device) if device.id == BACKGROUND_ID));
+
+        let snapshot = meter.snapshot();
+        assert_eq!(snapshot.active_devices.len(), 1);
+        assert_eq!(snapshot.active_devices[0].id, BACKGROUND_ID);
+
+        // Idle fluctuation stays below the edge threshold: no phantom devices.
+        for power in [24.0_f32, 22.0, 25.0, 21.5] {
+            assert_eq!(
+                meter.apply_reading(make_reading(power, -34.0, 128.0), &mut method),
+                DeviceChange::None
+            );
+        }
+        assert_eq!(meter.snapshot().active_devices.len(), 1);
+        assert_eq!(meter.snapshot().catalog.len(), 1);
+    }
+
+    #[test]
+    fn adaptive_learns_two_appliances_from_one_reading_per_event() {
+        use crate::meter::MeterState;
+        // The gateway sends roughly one already-settled reading per state change, so
+        // the method must decide on a single sample per edge.
+        let mut method = AdaptiveNilm::new();
+        let mut meter = MeterState::new(Vec::new());
+
+        meter.apply_reading(make_reading(23.0, -34.0, 8.0), &mut method);
+
+        // Appliance A on: +45 W, dQ -5 var.
+        let a_id = match meter.apply_reading(make_reading(68.0, -39.0, 8.0), &mut method) {
+            DeviceChange::Added(device) => device.id,
+            other => panic!("expected appliance A added, got {other:?}"),
+        };
+
+        // Appliance B on: +120 W, dQ -30 var.
+        let b_id = match meter.apply_reading(make_reading(188.0, -69.0, 8.0), &mut method) {
+            DeviceChange::Added(device) => device.id,
+            other => panic!("expected appliance B added, got {other:?}"),
+        };
+        assert_ne!(a_id, b_id);
+        assert_eq!(meter.snapshot().active_devices.len(), 3); // background + A + B
+
+        // Appliance A off: -45 W. The negated edge must resolve to A, not B.
+        assert!(matches!(
+            meter.apply_reading(make_reading(143.0, -64.0, 8.0), &mut method),
+            DeviceChange::Removed(device) if device.id == a_id
+        ));
+
+        // Appliance A on again: same edge -> re-matched, no new device minted.
+        assert!(matches!(
+            meter.apply_reading(make_reading(188.0, -69.0, 8.0), &mut method),
+            DeviceChange::Added(device) if device.id == a_id
+        ));
+
+        let catalog = meter.snapshot().catalog;
+        let learned = catalog.iter().filter(|d| d.id != BACKGROUND_ID).count();
+        assert_eq!(learned, 2, "only two appliances were ever seen");
+    }
+
+    #[test]
+    fn adaptive_caps_the_number_of_learned_appliances() {
+        use crate::meter::MeterState;
+        let mut method = AdaptiveNilm::with_params(1, 6.0, 8.0, 1.5, 2);
+        let mut meter = MeterState::new(Vec::new());
+        meter.apply_reading(make_reading(23.0, -34.0, 8.0), &mut method);
+
+        meter.apply_reading(make_reading(70.0, -34.0, 8.0), &mut method); // +47 -> learn #1
+        meter.apply_reading(make_reading(190.0, -34.0, 8.0), &mut method); // +120 -> learn #2
+        let before = meter.snapshot().catalog.len();
+
+        // A third distinct turn-on has no free slot.
+        assert_eq!(
+            meter.apply_reading(make_reading(400.0, -34.0, 8.0), &mut method),
+            DeviceChange::None
+        );
+        assert_eq!(meter.snapshot().catalog.len(), before);
     }
 }

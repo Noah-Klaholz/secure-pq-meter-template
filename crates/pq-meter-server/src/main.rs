@@ -51,7 +51,7 @@ struct Args {
     path: String,
 
     /// Algorithm used to infer device changes from total-power readings.
-    #[arg(long, value_enum, default_value_t = DecisionMethodArg::Settled)]
+    #[arg(long, value_enum, default_value_t = DecisionMethodArg::Adaptive)]
     decision_method: DecisionMethodArg,
 
     /// Local dashboard port (0 selects a free port). Always binds to 127.0.0.1.
@@ -65,7 +65,10 @@ struct Args {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DecisionMethodArg {
-    /// Wait for three readings within +/- 3 W before deciding.
+    /// Training-free online NILM: learn the idle background, then fingerprint each
+    /// settled step change in P-Q-distortion space and match or add a device.
+    Adaptive,
+    /// Wait for three readings within +/- 3 W before deciding (static catalog).
     Settled,
     /// Decide immediately from each change relative to the previous reading.
     Immediate,
@@ -122,10 +125,15 @@ async fn main() -> anyhow::Result<()> {
 
     // The table, decision method, and input decoder are supplied independently so each can
     // be replaced without changing the HTTP server.
-    let meter = Arc::new(Mutex::new(meter::MeterState::new(
-        decision::DUMMY_DEVICE_CATALOG.to_vec(),
-    )));
+    // The adaptive method learns every device at runtime, so it starts from an empty
+    // catalog; the static methods keep the predefined table.
+    let seed_catalog = match args.decision_method {
+        DecisionMethodArg::Adaptive => Vec::new(),
+        _ => decision::DUMMY_DEVICE_CATALOG.to_vec(),
+    };
+    let meter = Arc::new(Mutex::new(meter::MeterState::new(seed_catalog)));
     let decision_method: Box<dyn decision::DecisionMethod> = match args.decision_method {
+        DecisionMethodArg::Adaptive => Box::new(decision::AdaptiveNilm::new()),
         DecisionMethodArg::Settled => Box::new(decision::SettledPowerMatch::new(
             5.0, // Minimum change that can trigger a device-state update.
             3.0, // Consecutive readings must remain within +/- 3 W.
@@ -155,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
     let dashboard_source = Arc::new(dashboard::model::LiveMeterSource {
         meter: meter.clone(),
         decision_method: match args.decision_method {
+            DecisionMethodArg::Adaptive => "adaptive",
             DecisionMethodArg::Settled => "settled",
             DecisionMethodArg::Immediate => "immediate",
             DecisionMethodArg::MultiFeature => "multi-feature",

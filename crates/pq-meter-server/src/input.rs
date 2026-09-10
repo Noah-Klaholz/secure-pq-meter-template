@@ -213,50 +213,63 @@ struct LegacyMessage {
     message: String,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum IncomingReading {
-    // Boxed to keep the variants a similar size: a reading carries three phase blocks,
-    // a legacy message carries one string. It is unwrapped as soon as it is decoded.
-    Reading(Box<MeterReading>),
-    ClientMessage(LegacyMessage),
+/// Decodes one measurement, falling back to the legacy power-only message.
+///
+/// The two shapes are told apart by looking for the legacy `message` key rather than by
+/// trying each in turn as an untagged enum. An untagged enum throws the inner error away
+/// and reports only that nothing matched, which says nothing about *why* — a gateway one
+/// version behind, missing a single field, is indistinguishable from complete rubbish.
+/// Here serde's own error survives, and it names the field.
+fn decode_one(element: serde_json::Value) -> Result<MeterReading, String> {
+    let reading = if element.get("message").is_some() {
+        let LegacyMessage { message } =
+            serde_json::from_value(element).map_err(|error| error.to_string())?;
+        MeterReading::from(
+            message
+                .parse::<f32>()
+                .map_err(|_| "message must contain a power value in watts".to_owned())?,
+        )
+    } else {
+        serde_json::from_value::<MeterReading>(element).map_err(|error| error.to_string())?
+    };
+    reading.validate()?;
+    Ok(reading)
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum IncomingReadings {
-    Single(IncomingReading),
-    Batch(Vec<IncomingReading>),
+/// Names the JSON shape that arrived, for an error a person can act on.
+fn shape_of(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
 }
 
 impl ReadingDecoder for JsonReadingDecoder {
     fn decode_readings(&self, body: &[u8]) -> Result<Vec<MeterReading>, String> {
-        let incoming: IncomingReadings = serde_json::from_slice(body)
+        let body: serde_json::Value = serde_json::from_slice(body)
             .map_err(|error| format!("invalid meter-reading JSON: {error}"))?;
-        let readings = match incoming {
-            IncomingReadings::Single(reading) => vec![reading],
-            IncomingReadings::Batch(readings) => readings,
+        let elements = match body {
+            serde_json::Value::Array(elements) => elements,
+            object @ serde_json::Value::Object(_) => vec![object],
+            other => {
+                return Err(format!(
+                    "expected a measurement object or an array of them, got {}",
+                    shape_of(&other)
+                ));
+            }
         };
-        if readings.is_empty() {
+        if elements.is_empty() {
             return Err("measurement batch must not be empty".to_owned());
         }
-        readings
+        elements
             .into_iter()
             .enumerate()
-            .map(|(index, incoming)| {
-                let decode = || {
-                    let reading = match incoming {
-                        IncomingReading::Reading(reading) => *reading,
-                        IncomingReading::ClientMessage(LegacyMessage { message }) => {
-                            MeterReading::from(message.parse::<f32>().map_err(|_| {
-                                "message must contain a power value in watts".to_owned()
-                            })?)
-                        }
-                    };
-                    reading.validate()?;
-                    Ok(reading)
-                };
-                decode().map_err(|error: String| format!("reading {}: {error}", index + 1))
+            .map(|(index, element)| {
+                decode_one(element).map_err(|error| format!("reading {}: {error}", index + 1))
             })
             .collect()
     }
@@ -360,6 +373,49 @@ pub(crate) mod tests {
         assert_eq!(reading.l3.unwrap().voltage_v, Some(0.0));
         assert_eq!(reading.totals.unwrap().real_power_w, Some(100.0));
         assert_eq!(reading.totals.unwrap().reactive_power_var, Some(-10.0));
+    }
+
+    #[test]
+    fn names_the_field_that_is_wrong_instead_of_only_refusing_the_payload() {
+        // Exactly what a gateway one version behind sends: an L1 block without the
+        // voltage-distortion field. The answer has to say which field is missing, or the
+        // only way to find out is to diff the two versions by hand.
+        let older_gateway = serde_json::json!({
+            "total_power": 22.9,
+            "systime": 1_789_072_528_i64,
+            "frequency_hz": 50.0,
+            "l1": {
+                "voltage_v": 239.87,
+                "current_a": 0.28,
+                "real_power_w": 22.93,
+                "apparent_power_va": 67.36,
+                "reactive_power_var": -39.27,
+                "cos_phi": 0.5,
+                "real_energy_consumed_wh": 481.21,
+                "thd_current_pct": 108.98
+            }
+        });
+        let error = JsonReadingDecoder
+            .decode_readings(&serde_json::to_vec(&serde_json::json!([older_gateway])).unwrap())
+            .unwrap_err();
+
+        assert!(error.contains("reading 1"), "{error}");
+        assert!(error.contains("thd_voltage_pct"), "{error}");
+    }
+
+    #[test]
+    fn names_the_shape_that_arrived_when_it_is_not_a_measurement_at_all() {
+        for (body, expected) in [
+            ("null", "null"),
+            ("42", "a number"),
+            (r#""hello""#, "a string"),
+            ("true", "a boolean"),
+        ] {
+            let error = JsonReadingDecoder
+                .decode_readings(body.as_bytes())
+                .unwrap_err();
+            assert!(error.contains(expected), "{body}: {error}");
+        }
     }
 
     #[test]
