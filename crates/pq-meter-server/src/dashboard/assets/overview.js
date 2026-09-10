@@ -105,18 +105,18 @@ export function createOverview() {
       return;
     }
 
-    const value = (measurement) => measurement == null ? 'n/a' : String(measurement);
     const rows = samples.map(sample => {
       const row = document.createElement('tr');
-      for (const [measurement, unit] of [
-        [sample.at, ''],
-        [sample.total_power_watts, ' W'],
-        [sample.voltage_v?.[0], ' V'],
-        [sample.current_a?.[0], ' A'],
-        [sample.frequency_hz, ' Hz'],
-      ]) {
+      const values = [
+        time.format(new Date(sample.at)),
+        show(sample.total_power_watts, 1) + ' W',
+        show(sample.voltage_v?.[0], 1) + ' V',
+        show(sample.current_a?.[0], 2) + ' A',
+        show(sample.frequency_hz, 2) + ' Hz',
+      ];
+      for (const value of values) {
         const cell = document.createElement('td');
-        cell.textContent = `${value(measurement)}${measurement == null ? '' : unit}`;
+        cell.textContent = value;
         row.append(cell);
       }
       return row;
