@@ -7,11 +7,12 @@ use axum::{
 use tower::ServiceExt;
 
 use super::{
-    model::{LiveMeterSource, Snapshot},
+    model::{HistoryResponse, LiveMeterSource, Snapshot},
     *,
 };
 use crate::{
     decision::{ClosestPowerMatch, DUMMY_DEVICE_CATALOG},
+    input::MeterReading,
     meter::MeterState,
 };
 
@@ -110,6 +111,50 @@ async fn http_snapshot_is_versioned_read_only_and_uncached() {
 }
 
 #[tokio::test]
+async fn http_history_returns_recent_measurements() {
+    let source = source();
+    let mut method = ClosestPowerMatch::new(3.0);
+    let reading: MeterReading = serde_json::from_value(serde_json::json!({
+        "total_power": 123.0,
+        "systime": 456,
+        "frequency_hz": 50.0,
+        "l1": {
+            "voltage_v": 240.09,
+            "current_a": 0.28,
+            "real_power_w": 123.0,
+            "apparent_power_va": 130.0,
+            "reactive_power_var": 20.0,
+            "cos_phi": 0.95,
+            "real_energy_consumed_wh": 1000.0,
+            "thd_voltage_pct": 1.2,
+            "thd_current_pct": 2.0
+        }
+    }))
+    .unwrap();
+    source
+        .meter
+        .lock()
+        .unwrap()
+        .apply_reading(reading, &mut method);
+
+    let response = router(source)
+        .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+    let measurements = value["measurements"].as_array().unwrap();
+    assert_eq!(measurements.len(), 1);
+    assert_eq!(measurements[0]["data"]["total_power"], 123.0);
+    assert_eq!(measurements[0]["data"]["systime"], 456);
+    assert_eq!(measurements[0]["data"]["frequency_hz"], 50.0);
+    assert_eq!(measurements[0]["data"]["l1"]["voltage_v"], 240.09);
+    assert_eq!(measurements[0]["data"]["l1"]["current_a"], 0.28);
+    assert!(measurements[0]["timestamp"].as_str().unwrap().contains('T'));
+}
+
+#[tokio::test]
 async fn assets_have_correct_types_and_unknown_paths_return_not_found() {
     let app = router(source());
     for (path, content_type) in [
@@ -139,7 +184,7 @@ async fn assets_have_correct_types_and_unknown_paths_return_not_found() {
         );
     }
     let response = app
-        .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
+        .oneshot(Request::get("/api/v1/unknown").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -150,6 +195,10 @@ async fn unavailable_source_returns_json_error_instead_of_empty_measurements() {
     struct Unavailable;
     impl SnapshotSource for Unavailable {
         fn snapshot(&self) -> Result<Snapshot, &'static str> {
+            Err("meter state is unavailable")
+        }
+
+        fn history(&self, _count: usize) -> Result<HistoryResponse, &'static str> {
             Err("meter state is unavailable")
         }
     }
