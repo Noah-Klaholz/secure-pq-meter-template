@@ -9,6 +9,7 @@
 
 mod api;
 mod decision;
+pub mod history;
 mod input;
 mod network;
 
