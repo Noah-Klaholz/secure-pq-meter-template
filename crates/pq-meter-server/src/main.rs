@@ -1,20 +1,23 @@
 //! Server side of the Energy Data Hackdays gateway challenge.
 //!
-//! This binary does two things:
+//! This binary runs three cooperating services:
 //!
 //! 1. It starts a simulated SCION network (PocketSCION) with two ASes, see [`network`].
 //! 2. It runs an HTTP/3 server inside one of those ASes, see [`api`].
+//! 3. It serves a local, read-only web dashboard, see [`dashboard`].
 //!
 //! Run it on the laptop; run `pq-meter-client` on the gateway.
 
 mod api;
+mod dashboard;
 mod decision;
 pub mod history;
 mod input;
+mod meter;
 mod network;
 
 use std::{
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},
 };
 
@@ -45,6 +48,14 @@ struct Args {
     /// Algorithm used to infer device changes from total-power readings.
     #[arg(long, value_enum, default_value_t = DecisionMethodArg::Settled)]
     decision_method: DecisionMethodArg,
+
+    /// Local dashboard port (0 selects a free port). Always binds to 127.0.0.1.
+    #[arg(long, default_value_t = 8080)]
+    dashboard_port: u16,
+
+    /// Run the receiver without the local web dashboard.
+    #[arg(long)]
+    no_dashboard: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -64,6 +75,20 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+
+    // Reserve the dashboard port first so a conflict fails before starting SCION.
+    let dashboard_listener = if args.no_dashboard {
+        None
+    } else {
+        Some(
+            tokio::net::TcpListener::bind(SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                args.dashboard_port,
+            )))
+            .await
+            .context("binding the local dashboard; use --dashboard-port to select another port")?,
+        )
+    };
 
     // The SDK uses rustls for its control plane; pick a crypto backend.
     scion_sdk_utils::rustls::select_ring_crypto_provider();
@@ -90,37 +115,55 @@ async fn main() -> anyhow::Result<()> {
 
     // The table, decision method, and input decoder are supplied independently so each can
     // be replaced without changing the HTTP server.
-    let meter = Arc::new(Mutex::new(api::MeterState::new(
+    let meter = Arc::new(Mutex::new(meter::MeterState::new(
         decision::DUMMY_DEVICE_CATALOG.to_vec(),
     )));
     let decision_method: Box<dyn decision::DecisionMethod> = match args.decision_method {
         DecisionMethodArg::Settled => Box::new(decision::SettledPowerMatch::new(
             5.0, // Minimum change that can trigger a device-state update.
             3.0, // Consecutive readings must remain within +/- 3 W.
-            3,   // At one reading/second, this waits roughly two seconds after the change.
+            3,   // Count individual measurements, including those delivered in one batch.
             5.0, // Maximum difference between the settled delta and table value.
         )),
         DecisionMethodArg::Immediate => Box::new(decision::ClosestPowerMatch::new(5.0)),
     };
     let decision_method: api::SharedDecisionMethod = Arc::new(Mutex::new(decision_method));
-    let reading_decoder: input::SharedReadingDecoder = Arc::new(input::DummyJsonDecoder);
+    let reading_decoder: input::SharedReadingDecoder = Arc::new(input::JsonReadingDecoder);
 
     println!("SCION network is up");
     println!("  gateway endhost API: {}", network.gateway_endhost_api);
     println!("  HTTP/3 server:       {server_address}");
     println!("  accepting POST on:   {}", args.path);
-    println!(r#"  expected JSON:       {{"total_power": 860.0}}"#);
+    println!(
+        r#"  expected JSON:       [{{"total_power": 860.0}}] (or one object; context optional)"#
+    );
     println!();
     println!("Start the client with:");
     println!("  pq-meter-client --server {}", args.bind_ip);
     println!();
 
-    api::serve(
+    let dashboard_source = Arc::new(dashboard::model::LiveMeterSource {
+        meter: meter.clone(),
+        decision_method: match args.decision_method {
+            DecisionMethodArg::Settled => "settled",
+            DecisionMethodArg::Immediate => "immediate",
+        },
+    });
+    let receiver = api::serve(
         Arc::new(socket) as Arc<dyn GenericScionUdpSocket>,
         &args.path,
         meter,
         decision_method,
         reading_decoder,
-    )
-    .await
+    );
+    if let Some(listener) = dashboard_listener {
+        println!("  local dashboard:    http://{}/", listener.local_addr()?);
+        // Both services share a lifetime; propagate errors instead of losing a background task.
+        tokio::select! {
+            result = receiver => result,
+            result = dashboard::serve(listener, dashboard_source) => result,
+        }
+    } else {
+        receiver.await
+    }
 }

@@ -23,8 +23,11 @@ crates/
     src/main.rs            Command line interface, starts everything
     src/network.rs         The simulated SCION network (which ASes, which addresses)
     src/api.rs             The HTTP/3 endpoint that receives the data
+    src/input.rs           Typed measurement decoding and batch validation
+    src/meter.rs           Shared current state, independent of either HTTP transport
+    src/dashboard/         Local dashboard, versioned read API, and embedded UI assets
   pq-meter-client/         Runs on the gateway
-    src/main.rs            Sends one message and prints the answer
+    src/main.rs            Reads the meter and sends batches of measurements
   umg605-modbus-client/    Reads data from a UMG 605-PRO power quality meter over Modbus TCP
     src/lib.rs             The Modbus TCP client and the registers it reads
     bin/pinger.rs          Example binary that reads values from the meter
@@ -78,6 +81,9 @@ In the first terminal:
 cargo run -p pq-meter-server
 ```
 
+The server also starts a local dashboard at **http://127.0.0.1:8080/**. See
+[Local dashboard](#local-dashboard) for configuration and the extension points.
+
 It prints, among the log lines:
 
 ```text
@@ -98,14 +104,11 @@ cargo run -p pq-meter-client -- \
   --server '[2-ff00:0:212,127.0.0.1]:59218'
 ```
 
-The client prints `server answered 200 OK: ok`, and the server prints what it received:
-
-```text
-received: {"message":"Hello from Energy Data Hackdays 2026"}
-```
-
-The server keeps running; the client sends one message and exits. Use `--message` to send
-something else.
+The client needs a reachable Modbus meter (default `10.10.0.2:502`; override with
+`--meter-ip` and `--meter-port`). It continuously reads measurements every 200 ms and
+sends a JSON array when either `--batch-size` (default 10) or `--batch-timeout-ms`
+(default 1000 ms) is reached. The server acknowledges accepted batches and updates its
+meter and device state. See [Measurement ingestion](#measurement-ingestion) for the payload.
 
 Note that the port of the server address (`59218` above) is assigned by the SNAP and is
 different on every start, so take the address from the output rather than from this README.
@@ -126,7 +129,7 @@ The printed URLs and addresses now use that IP address. Run the client on the Pi
 ./pq-meter-client \
   --endhost-api http://192.168.1.42:31000/ \
   --server '[2-ff00:0:212,192.168.1.42]:59218' \
-  --message '{"my":"first measurement"}'
+  --meter-ip 10.10.0.2
 ```
 
 The server binds these ports on the address you pass, and all of them have to be reachable
@@ -159,6 +162,132 @@ Two more things to check when the ports look fine:
   answer leaves through your WLAN interface, and disconnect the VPN while you work.
 * The Pi and the laptop have to be on the **same network**, and it must not be a guest WLAN —
   those often block traffic between devices.
+
+## Measurement ingestion
+
+`POST /edh/v1/hello` (or the configured `--path`) accepts a single measurement object
+or a non-empty JSON array in the client's format:
+
+```json
+[
+  {
+    "total_power": 100.0,
+    "systime": 123456,
+    "frequency_hz": 50.0,
+    "l1": {
+      "voltage_v": 230.0,
+      "current_a": 0.5,
+      "real_power_w": 100.0,
+      "apparent_power_va": 115.0,
+      "reactive_power_var": -10.0,
+      "cos_phi": 0.9,
+      "real_energy_consumed_wh": 1234.0,
+      "thd_current_pct": 2.0
+    }
+  }
+]
+```
+
+`total_power` must be a finite, non-negative number in watts. It is the authoritative
+input for device detection; the current client populates it from L1 real power, so it
+is **not a measured three-phase sum**. The server does not derive it from `l1`.
+
+For compatibility, `systime`, `frequency_hz`, and `l1` may be omitted. When supplied,
+`systime` must be a signed 32-bit integer, matching the client's raw meter register;
+`frequency_hz` must be a finite number; and `l1` must contain all eight numeric fields
+shown above, each finite. Explicit `null` and string values are rejected. No additional
+physical range checks are applied to context fields; signed reactive power is accepted.
+Unknown fields are ignored. Legacy aliases `power`, `power_watts`, and `power_l1_n`,
+and the legacy object `{"message":"100"}`, remain supported.
+
+The entire request is validated before any state changes. Empty batches, malformed JSON,
+and invalid readings return HTTP 400 without updating either meter or decision state.
+Accepted readings are processed in array order, with no timestamp sorting or deduplication.
+Every sample advances the reading count and decision method, including settling across
+batch boundaries. Concurrent requests cannot interleave samples within a batch.
+
+Successful requests return HTTP 200 with a compact text acknowledgement. A single reading
+keeps the baseline/device-change response; multiple readings return, for example,
+`accepted 10 readings: 1 added, 0 removed`. This fits the client's 4096-byte response limit.
+
+The latest complete accepted reading is available as `latest_reading` in `GET /api/v1/state`.
+Missing context is omitted from that object; before any readings it is `null`. A later
+power-only reading replaces the previous context rather than retaining stale values.
+The server receipt timestamp (`last_received_at`) remains separate from meter `systime`.
+Only the latest reading is retained; the dashboard UI and device algorithms still use
+`total_power`.
+
+## Local dashboard
+
+Run the server, then open [PQ Monitor](http://127.0.0.1:8080/) in a browser:
+
+```bash
+cargo run -p pq-meter-server
+# Choose another port (0 selects an available port, printed at startup):
+cargo run -p pq-meter-server -- --dashboard-port 8081
+# Run only the SCION receiver:
+cargo run -p pq-meter-server -- --no-dashboard
+```
+
+The dashboard always binds to `127.0.0.1`, independently of `--bind-ip`, so making SCION
+reachable from the gateway does not expose the dashboard to the network. HTML, CSS, and
+JavaScript are embedded in the Rust binary; there is no frontend build, CDN, or extra
+process to start. Recompile the server after editing an asset.
+
+The overview refreshes once per second and shows:
+
+- The latest accepted total-power reading, in watts.
+- Inferred active devices and their summed nominal catalog power.
+- All catalog entries, the latest device addition/removal, and the selected decision method.
+- Accepted reading count and the server receipt time of the last reading.
+
+Before a reading arrives, measurements show as unavailable. After ten seconds without an
+accepted reading, the view marks the retained state as stale. If the dashboard API becomes
+unreachable, it preserves the last view, marks it disconnected, and retries automatically.
+Polling pauses in background tabs and resumes when they become visible.
+
+Device activity is inferred from **changes** in total power. The first reading establishes
+a baseline; a device already on at startup is not automatically identified. “Not detected”
+is therefore not a confirmed off state, and nominal catalog power is not an individual
+measurement. The receiver validates and retains the latest gateway measurement, including
+voltage, frequency, and other context, in the read API's `latest_reading` field. These extra
+fields are not displayed by the overview UI.
+
+### Dashboard architecture and future history
+
+`meter.rs` owns the current application state. The SCION ingestion handler updates it only
+after a reading has been decoded and accepted. It records receipt time, reading count, and
+the latest actual device change alongside the existing power and device state.
+
+`dashboard/model.rs` defines the dashboard's serializable read model and `SnapshotSource`
+interface. `LiveMeterSource` takes a consistent copy of meter state under a short lock,
+then builds the response after releasing it. The dashboard never calls the decision engine
+or mutates the meter. Alternative sources can implement the same interface.
+
+`dashboard/mod.rs` serves the embedded assets and read-only `GET /api/v1/state` endpoint.
+The response includes `schema_version`, server timestamps, the stale threshold, power,
+reading count, device states, the last change, and the latest full measurement. Responses
+disable caching. No reading is represented as JSON `null`, not zero. An unavailable store
+returns a JSON error with HTTP 503; mutation requests are not supported.
+
+The frontend separates HTTP requests (`assets/api.js`), polling and lifecycle
+(`assets/app.js`), and rendering (`assets/overview.js`). Add future views alongside the
+overview, with their own API functions and navigation entries.
+
+There is **no historical storage yet**: only one current state and the last device change
+are retained, and a server restart resets them. To add history, record timestamped accepted
+readings and device changes at the ingestion boundary, use bounded retention or persistent
+storage, and expose a separate time-range/paginated endpoint (for example,
+`GET /api/v1/history`). Keep historical queries separate from the lightweight live snapshot;
+do not grow the shared state or live response into an unbounded event list.
+
+Validation for this module:
+
+```bash
+cargo test -p pq-meter-server
+cargo clippy -p pq-meter-server --all-targets -- -D warnings
+cargo fmt -p pq-meter-server -- --check
+```
 
 ## Read from the meter
 
@@ -287,14 +416,13 @@ cargo cross build --release -p umg605-modbus-client --bin pinger --target aarch6
 * **Read the meter.** `pq-meter-client` already depends on `umg605-modbus-client`, so
   `use umg605_modbus_client::Umg605ProClient;` in `crates/pq-meter-client/src/main.rs` is
   enough to read a value and send it on. Check the meter with the `pinger` [first](#read-from-the-meter).
-* **Send your own data.** The client sends a JSON object with one field. Build whatever
-  structure your measurements need in `crates/pq-meter-client/src/main.rs`, and send in a
-  loop instead of once. Keep the one `scion_http3::Client`: it holds a pool of connections,
-  so every request after the first one reuses the connection that is already up.
-* **Receive your own data.** The server prints the request body as text
-  (`crates/pq-meter-server/src/api.rs`). It is a normal [axum](https://docs.rs/axum)
-  application, so you can add routes, and let axum parse your JSON into a type by taking
-  `axum::Json<YourType>` as the handler argument.
+* **Send your own data.** The client sends batches of measurements from
+  `crates/pq-meter-client/src/main.rs`. Extend its payload and the typed decoder in
+  `crates/pq-meter-server/src/input.rs` together. Keep the one `scion_http3::Client` so
+  requests reuse its connection pool.
+* **Receive your own data.** `crates/pq-meter-server/src/api.rs` validates complete
+  batches before feeding each reading to the decision method and shared meter state.
+  Replace `ReadingDecoder` to support another wire format, or add routes to the axum app.
 * **Look at paths.** SCION lets an application see and choose the paths to a destination. The
   [academy](https://learn.anapaya.net/docs/academy/scion-sdk/) explains how paths are built,
   and `crates/pq-meter-server/src/network.rs` is where you would add more autonomous systems

@@ -1,4 +1,7 @@
-.PHONY: run-server run-client client stop-client kill-client build-client-local build-client deploy-client build-pinger deploy-pinger
+.PHONY: test run-server stop-server restart-server run-client client stop-client kill-client build-client-local build-client deploy-client build-pinger deploy-pinger
+
+test:
+	cargo test --workspace
 
 OS := $(shell uname -s)
 
@@ -27,6 +30,15 @@ run-server:
 	fi
 	@echo "Starting server on WLAN IP: $(WLAN_IP)"
 	cargo run -p pq-meter-server -- --bind-ip $(WLAN_IP)
+
+stop-server:
+	@echo "Stopping pq-meter-server..."
+	@pkill -INT -x pq-meter-server 2>/dev/null || true
+	@echo "Stopped."
+
+restart-server: stop-server
+	@sleep 1
+	@$(MAKE) run-server
 
 run-client:
 	@if [ -z "$(SERVER)" ]; then \

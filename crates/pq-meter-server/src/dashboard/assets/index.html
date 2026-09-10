@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Meter overview · PQ Monitor</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to overview</a>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="PQ Monitor home"><span class="brand-icon" aria-hidden="true">▥</span> PQ Monitor</a>
+    <span class="environment">LOCAL WORKSPACE</span>
+  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <p class="nav-label">MONITORING</p>
+      <nav aria-label="Dashboard views"><a class="nav-item selected" href="#overview" aria-current="page"><span aria-hidden="true">▦</span> Overview</a></nav>
+      <div class="sidebar-note"><span class="tiny-dot"></span> SCION meter receiver<p>Current session<br>In-memory state</p></div>
+    </aside>
+    <main id="main">
+      <section id="overview" aria-labelledby="page-title">
+        <div class="page-heading">
+          <div><p class="eyebrow">POWER QUALITY / LIVE STATE</p><h1 id="page-title">Meter overview</h1><p class="subtitle">Power readings and inferred device activity.</p></div>
+          <div class="refresh-area"><span id="connection" class="badge neutral" role="status">Connecting</span><button id="refresh" type="button">↻ <span>Refresh</span></button></div>
+        </div>
+        <div id="notice" class="notice" role="status">Connecting to the local receiver…</div>
+        <noscript><p class="notice">Enable JavaScript to display live readings.</p></noscript>
+        <div class="metrics">
+          <article class="metric primary"><p class="metric-label">Measured power <span aria-hidden="true">↗</span></p><p class="metric-value"><span id="total-power">—</span> <span class="unit">W</span></p><p class="metric-note">Latest accepted meter reading</p></article>
+          <article class="metric"><p class="metric-label">Inferred active devices</p><p class="metric-value"><span id="active-count">—</span><span id="catalog-count" class="unit"></span></p><p class="metric-note">Matched from changes in power</p></article>
+          <article class="metric"><p class="metric-label">Inferred nominal power</p><p class="metric-value"><span id="inferred-power">—</span> <span class="unit">W</span></p><p class="metric-note">Sum of active catalog values</p></article>
+          <article class="metric"><p class="metric-label">Readings received</p><p class="metric-value" id="readings-count">—</p><p class="metric-note">Since this server started</p></article>
+        </div>
+        <div class="detail-grid">
+          <article class="panel devices-panel">
+            <div class="panel-heading"><div><h2>Device activity</h2><p>Catalog matches from the decision engine</p></div><span id="device-summary" class="small-label">—</span></div>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Device</th><th scope="col">Nominal power</th><th scope="col">Inferred state</th></tr></thead><tbody id="devices"><tr><td colspan="3" class="empty">Waiting for the receiver…</td></tr></tbody></table></div>
+            <p class="panel-footnote">Device states are estimates. The initial reading establishes a baseline; devices already drawing power may not be identified.</p>
+          </article>
+          <div class="side-panels">
+            <article class="panel"><div class="panel-heading"><h2>Latest device change</h2></div><div class="panel-body"><span id="change-kind" class="badge neutral">No change yet</span><h3 id="change-device">Waiting for a match</h3><p id="change-detail" class="muted">Detected additions and removals will appear here.</p><p id="change-time" class="timestamp">—</p></div></article>
+            <article class="panel"><div class="panel-heading"><h2>Receiver details</h2></div><dl class="details"><div><dt>Decision method</dt><dd id="method">—</dd></div><div><dt>Last reading</dt><dd id="last-reading">—</dd></div><div><dt>Dashboard refresh</dt><dd>Every second</dd></div><div><dt>Storage</dt><dd>Current state only</dd></div></dl></article>
+          </div>
+        </div>
+        <footer class="page-footer"><span>Power values in watts · Device power is nominal, not individually measured.</span><span id="last-sync">Not yet synchronized</span></footer>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
