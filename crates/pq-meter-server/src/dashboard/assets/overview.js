@@ -125,9 +125,27 @@ export function createOverview() {
   }
 
   return {
+    historyLoading() {
+      text('history-status', 'Loading');
+      const cell = document.querySelector('#recent-measurements .empty');
+      if (cell) cell.textContent = 'Loading measurements…';
+    },
+
     history(series) {
       history = series;
+      text('history-status', 'Live');
       renderRecentMeasurements(series);
+    },
+
+    historyError() {
+      text('history-status', 'Unavailable');
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 5;
+      cell.className = 'empty';
+      cell.textContent = 'History is currently unavailable';
+      row.append(cell);
+      byId('recent-measurements').replaceChildren(row);
     },
 
     render(snapshot) {
