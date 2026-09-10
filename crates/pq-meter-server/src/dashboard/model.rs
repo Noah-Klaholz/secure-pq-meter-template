@@ -6,10 +6,15 @@
 use chrono::Utc;
 use serde::Serialize;
 
-use crate::{decision::DeviceChange, input::MeterReading, meter::SharedMeterState};
+use crate::{
+    decision::DeviceChange,
+    input::MeterReading,
+    meter::SharedMeterState,
+};
 
 pub trait SnapshotSource: Send + Sync {
     fn snapshot(&self) -> Result<Snapshot, &'static str>;
+    fn history(&self, count: usize) -> Result<HistoryResponse, &'static str>;
 }
 
 pub struct LiveMeterSource {
@@ -30,6 +35,17 @@ pub struct Snapshot {
     pub inferred_power_watts: f64,
     pub devices: Vec<DeviceStatus>,
     pub last_change: Option<Change>,
+}
+
+#[derive(Serialize)]
+pub struct HistoryResponse {
+    pub measurements: Vec<HistoryMeasurement>,
+}
+
+#[derive(Serialize)]
+pub struct HistoryMeasurement {
+    pub timestamp: String,
+    pub data: MeterReading,
 }
 
 #[derive(Serialize)]
@@ -113,5 +129,21 @@ impl SnapshotSource for LiveMeterSource {
                 })
             }),
         })
+    }
+
+    fn history(&self, count: usize) -> Result<HistoryResponse, &'static str> {
+        let meter = self
+            .meter
+            .lock()
+            .map_err(|_| "meter state is unavailable")?;
+        let measurements = meter
+            .recent_history(count)
+            .iter()
+            .map(|entry| HistoryMeasurement {
+                timestamp: chrono::DateTime::<Utc>::from(entry.timestamp).to_rfc3339(),
+                data: entry.data,
+            })
+            .collect();
+        Ok(HistoryResponse { measurements })
     }
 }

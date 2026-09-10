@@ -28,6 +28,7 @@ pub fn router(source: Arc<dyn SnapshotSource>) -> Router {
         .route("/assets/api.js", get(|| async { asset("text/javascript; charset=utf-8", include_str!("assets/api.js")) }))
         .route("/assets/overview.js", get(|| async { asset("text/javascript; charset=utf-8", include_str!("assets/overview.js")) }))
         .route("/api/v1/state", get(current_state))
+        .route("/api/v1/history", get(history))
         .with_state(source)
         .layer(middleware::map_response(|mut response: axum::response::Response| async move {
             let headers = response.headers_mut();
@@ -45,6 +46,17 @@ fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
 async fn current_state(State(source): State<Arc<dyn SnapshotSource>>) -> impl IntoResponse {
     match source.snapshot() {
         Ok(snapshot) => Json(snapshot).into_response(),
+        Err(message) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": message })),
+        )
+            .into_response(),
+    }
+}
+
+async fn history(State(source): State<Arc<dyn SnapshotSource>>) -> impl IntoResponse {
+    match source.history(10) {
+        Ok(history) => Json(history).into_response(),
         Err(message) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "error": message })),
