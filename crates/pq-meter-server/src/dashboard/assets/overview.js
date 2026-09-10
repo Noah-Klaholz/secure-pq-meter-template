@@ -91,9 +91,43 @@ export function createOverview() {
     text('phase-summary', samples.length ? `${integer.format(samples.length)} samples in the last ${history.window_seconds} s` : '—');
   }
 
+  function renderRecentMeasurements(series) {
+    const samples = (series.samples ?? []).slice(-10);
+    const body = byId('recent-measurements');
+    if (!samples.length) {
+      const row = document.createElement('tr');
+      const empty = document.createElement('td');
+      empty.colSpan = 5;
+      empty.className = 'empty';
+      empty.textContent = 'No measurements yet';
+      row.append(empty);
+      body.replaceChildren(row);
+      return;
+    }
+
+    const value = (measurement) => measurement == null ? 'n/a' : String(measurement);
+    const rows = samples.map(sample => {
+      const row = document.createElement('tr');
+      for (const [measurement, unit] of [
+        [sample.at, ''],
+        [sample.total_power_watts, ' W'],
+        [sample.voltage_v?.[0], ' V'],
+        [sample.current_a?.[0], ' A'],
+        [sample.frequency_hz, ' Hz'],
+      ]) {
+        const cell = document.createElement('td');
+        cell.textContent = `${value(measurement)}${measurement == null ? '' : unit}`;
+        row.append(cell);
+      }
+      return row;
+    });
+    body.replaceChildren(...rows);
+  }
+
   return {
     history(series) {
       history = series;
+      renderRecentMeasurements(series);
     },
 
     render(snapshot) {
