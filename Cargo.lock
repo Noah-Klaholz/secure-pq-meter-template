@@ -3082,6 +3082,7 @@ dependencies = [
  "serde_json",
  "snap-tokens",
  "tokio",
+ "tokio-modbus",
  "tracing-subscriber",
  "umg605-modbus-client",
  "url",

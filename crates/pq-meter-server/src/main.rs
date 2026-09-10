@@ -75,12 +75,7 @@ async fn main() -> anyhow::Result<()> {
     println!("  accepting POST on:   {}", args.path);
     println!();
     println!("Start the client with:");
-    // The address is quoted because a shell would otherwise read the square brackets as a
-    // file name pattern.
-    println!(
-        "  pq-meter-client --endhost-api {} --server '{server_address}'",
-        network.gateway_endhost_api
-    );
+    println!("  pq-meter-client --server {}", args.bind_ip);
     println!();
 
     api::serve(
