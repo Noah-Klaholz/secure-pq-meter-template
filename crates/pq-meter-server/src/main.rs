@@ -121,19 +121,21 @@ async fn main() -> anyhow::Result<()> {
         DecisionMethodArg::Settled => Box::new(decision::SettledPowerMatch::new(
             5.0, // Minimum change that can trigger a device-state update.
             3.0, // Consecutive readings must remain within +/- 3 W.
-            3,   // At one reading/second, this waits roughly two seconds after the change.
+            3,   // Count individual measurements, including those delivered in one batch.
             5.0, // Maximum difference between the settled delta and table value.
         )),
         DecisionMethodArg::Immediate => Box::new(decision::ClosestPowerMatch::new(5.0)),
     };
     let decision_method: api::SharedDecisionMethod = Arc::new(Mutex::new(decision_method));
-    let reading_decoder: input::SharedReadingDecoder = Arc::new(input::DummyJsonDecoder);
+    let reading_decoder: input::SharedReadingDecoder = Arc::new(input::JsonReadingDecoder);
 
     println!("SCION network is up");
     println!("  gateway endhost API: {}", network.gateway_endhost_api);
     println!("  HTTP/3 server:       {server_address}");
     println!("  accepting POST on:   {}", args.path);
-    println!(r#"  expected JSON:       {{"total_power": 860.0}}"#);
+    println!(
+        r#"  expected JSON:       [{{"total_power": 860.0}}] (or one object; context optional)"#
+    );
     println!();
     println!("Start the client with:");
     println!("  pq-meter-client --server {}", args.bind_ip);

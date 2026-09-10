@@ -42,9 +42,7 @@ pub async fn serve(
         decision_method,
         reading_decoder,
     };
-    let app = Router::new()
-        .route(path, post(receive))
-        .with_state(app_state);
+    let app = router(path, app_state);
     let config = quic_config().context("building the QUIC server configuration")?;
 
     ScionH3AxumServer::serve(socket, app, config)
@@ -52,10 +50,15 @@ pub async fn serve(
         .map_err(|error| anyhow::anyhow!("HTTP/3 server stopped: {error}"))
 }
 
-/// Decodes one reading, asks the selected method for a decision, and updates shared state.
+fn router(path: &str, state: AppState) -> Router {
+    Router::new().route(path, post(receive)).with_state(state)
+}
+
+/// Validates the whole request before applying each reading in order. Holding both
+/// locks for the batch prevents other requests from interleaving its measurements.
 async fn receive(State(state): State<AppState>, body: Bytes) -> (StatusCode, String) {
-    let total_power = match state.reading_decoder.decode_total_power(&body) {
-        Ok(total_power) => total_power,
+    let readings = match state.reading_decoder.decode_readings(&body) {
+        Ok(readings) => readings,
         Err(message) => return (StatusCode::BAD_REQUEST, format!("{message}\n")),
     };
 
@@ -78,9 +81,32 @@ async fn receive(State(state): State<AppState>, body: Bytes) -> (StatusCode, Str
         }
     };
 
-    let was_first_reading = meter.latest_power().is_none();
-    let change = meter.apply_reading(total_power, decision_method.as_mut());
-    let response = match change {
+    let count = readings.len();
+    let mut additions = 0;
+    let mut removals = 0;
+    let mut response = String::new();
+    for reading in readings {
+        let was_first_reading = meter.latest_power().is_none();
+        let change = meter.apply_reading(reading, decision_method.as_mut());
+        match change {
+            DeviceChange::Added(_) => additions += 1,
+            DeviceChange::Removed(_) => removals += 1,
+            DeviceChange::None => {}
+        }
+        if count == 1 {
+            response = reading_response(change, was_first_reading, reading.total_power);
+        }
+    }
+    if count > 1 {
+        // Keep the acknowledgement bounded: the client reads at most 4096 bytes.
+        response = format!("accepted {count} readings: {additions} added, {removals} removed\n");
+    }
+
+    (StatusCode::OK, response)
+}
+
+fn reading_response(change: DeviceChange, was_first_reading: bool, total_power: f32) -> String {
+    match change {
         DeviceChange::Added(device) => {
             format!("added {} ({:.1} W)\n", device.name, device.power_watts)
         }
@@ -91,9 +117,7 @@ async fn receive(State(state): State<AppState>, body: Bytes) -> (StatusCode, Str
             format!("baseline recorded at {total_power:.1} W\n")
         }
         DeviceChange::None => "no device state change\n".to_owned(),
-    };
-
-    (StatusCode::OK, response)
+    }
 }
 
 /// Builds the QUIC configuration of the server, with a self-signed certificate that is
@@ -153,6 +177,174 @@ mod tests {
         meter::MeterState,
     };
 
+    fn test_state(method: Box<dyn DecisionMethod>) -> AppState {
+        AppState {
+            meter: Arc::new(Mutex::new(MeterState::new(DUMMY_DEVICE_CATALOG.to_vec()))),
+            decision_method: Arc::new(Mutex::new(method)),
+            reading_decoder: Arc::new(crate::input::JsonReadingDecoder),
+        }
+    }
+
+    async fn post_json(state: AppState, body: serde_json::Value) -> (StatusCode, String) {
+        use axum::{
+            body::{Body, to_bytes},
+            http::Request,
+        };
+        use tower::ServiceExt;
+
+        let response = router(DEFAULT_PATH, state)
+            .oneshot(
+                Request::post(DEFAULT_PATH)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn client_batch_applies_every_reading_in_order_and_exposes_context() {
+        use crate::{
+            dashboard::model::{LiveMeterSource, SnapshotSource},
+            input::tests::client_reading,
+        };
+
+        let state = test_state(Box::new(ClosestPowerMatch::new(3.0)));
+        let batch = serde_json::json!([
+            client_reading(100.0, 10),
+            client_reading(123.0, 11),
+            client_reading(100.0, 12),
+            client_reading(165.0, 13),
+        ]);
+        let (status, response) = post_json(state.clone(), batch.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response, "accepted 4 readings: 2 added, 1 removed\n");
+        let source = LiveMeterSource {
+            meter: state.meter.clone(),
+            decision_method: "immediate",
+        };
+        let snapshot = source.snapshot().unwrap();
+        assert_eq!(snapshot.readings_received, 4);
+        assert_eq!(snapshot.total_power_watts, Some(165.0));
+        assert!(!snapshot.devices[0].active);
+        assert!(snapshot.devices[1].active);
+        assert_eq!(
+            serde_json::to_value(snapshot.latest_reading).unwrap(),
+            batch[3]
+        );
+        assert_eq!(
+            snapshot.last_change.unwrap().device_id,
+            DUMMY_DEVICE_CATALOG[1].id
+        );
+
+        // A later legacy reading must not inherit context from an older measurement.
+        let (status, _) = post_json(state, serde_json::json!({"total_power": 165})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::to_value(source.snapshot().unwrap().latest_reading).unwrap(),
+            serde_json::json!({"total_power": 165.0})
+        );
+    }
+
+    #[tokio::test]
+    async fn settled_decisions_count_samples_within_and_across_batches() {
+        use crate::decision::SettledPowerMatch;
+        for batches in [
+            vec![vec![100, 123, 123, 123]],
+            vec![vec![100, 123], vec![123, 123]],
+            vec![vec![100], vec![123], vec![123], vec![123]],
+        ] {
+            let state = test_state(Box::new(SettledPowerMatch::new(5.0, 3.0, 3, 5.0)));
+            for powers in batches {
+                let readings: Vec<_> = powers
+                    .into_iter()
+                    .map(|power| serde_json::json!({"total_power": power}))
+                    .collect();
+                assert_eq!(
+                    post_json(state.clone(), serde_json::json!(readings))
+                        .await
+                        .0,
+                    StatusCode::OK
+                );
+            }
+            let meter = state.meter.lock().unwrap().snapshot();
+            assert_eq!(meter.readings_received, 4);
+            assert_eq!(meter.active_devices, vec![DUMMY_DEVICE_CATALOG[0]]);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_batches_leave_meter_and_stateful_decisions_untouched() {
+        use crate::{decision::SettledPowerMatch, input::tests::client_reading};
+        let state = test_state(Box::new(SettledPowerMatch::new(5.0, 3.0, 3, 5.0)));
+        assert_eq!(
+            post_json(state.clone(), client_reading(100.0, 10)).await.0,
+            StatusCode::OK
+        );
+        let before = state.meter.lock().unwrap().snapshot();
+        for invalid in [
+            serde_json::json!([]),
+            serde_json::json!([client_reading(123.0, 11), client_reading(123.0, 12), {"total_power": -1}]),
+            serde_json::json!([client_reading(123.0, 11), {"total_power": 123, "l1": {"voltage_v": "bad"}}]),
+        ] {
+            assert_eq!(
+                post_json(state.clone(), invalid).await.0,
+                StatusCode::BAD_REQUEST
+            );
+            let after = state.meter.lock().unwrap().snapshot();
+            assert_eq!(after.latest_reading, before.latest_reading);
+            assert_eq!(after.readings_received, before.readings_received);
+            assert_eq!(after.last_received_at, before.last_received_at);
+            assert_eq!(after.last_change, before.last_change);
+            assert_eq!(after.active_devices, before.active_devices);
+        }
+        assert_eq!(
+            post_json(state.clone(), client_reading(123.0, 13)).await.0,
+            StatusCode::OK
+        );
+        let after = state.meter.lock().unwrap().snapshot();
+        assert_eq!(after.readings_received, 2);
+        assert!(
+            after.active_devices.is_empty(),
+            "rejected samples must not advance settling"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_element_batches_and_legacy_messages_keep_single_reading_responses() {
+        let state = test_state(Box::new(ClosestPowerMatch::new(3.0)));
+        assert_eq!(
+            post_json(state.clone(), serde_json::json!([{"total_power": 100}])).await,
+            (StatusCode::OK, "baseline recorded at 100.0 W\n".to_owned())
+        );
+        assert_eq!(
+            post_json(state.clone(), serde_json::json!({"message": "123"})).await,
+            (StatusCode::OK, "added Baseline (23.0 W)\n".to_owned())
+        );
+        assert_eq!(state.meter.lock().unwrap().snapshot().readings_received, 2);
+    }
+
+    #[tokio::test]
+    async fn large_batches_fit_the_clients_response_limit() {
+        let state = test_state(Box::new(ClosestPowerMatch::new(3.0)));
+        let readings = vec![serde_json::json!({"total_power": 100}); 1000];
+        assert_eq!(
+            post_json(state.clone(), serde_json::json!(readings)).await,
+            (
+                StatusCode::OK,
+                "accepted 1000 readings: 0 added, 0 removed\n".to_owned()
+            )
+        );
+        assert_eq!(
+            state.meter.lock().unwrap().snapshot().readings_received,
+            1000
+        );
+    }
+
     #[tokio::test]
     async fn only_accepted_requests_update_the_dashboard_state() {
         use crate::dashboard::model::{LiveMeterSource, SnapshotSource};
@@ -160,7 +352,7 @@ mod tests {
         let state = AppState {
             meter: meter.clone(),
             decision_method: Arc::new(Mutex::new(Box::new(ClosestPowerMatch::new(3.0)))),
-            reading_decoder: Arc::new(crate::input::DummyJsonDecoder),
+            reading_decoder: Arc::new(crate::input::JsonReadingDecoder),
         };
         let source = LiveMeterSource {
             meter,
@@ -192,13 +384,16 @@ mod tests {
         let mut state = MeterState::new(DUMMY_DEVICE_CATALOG.to_vec());
         let mut method = ClosestPowerMatch::new(3.0);
 
-        assert_eq!(state.apply_reading(100.0, &mut method), DeviceChange::None);
         assert_eq!(
-            state.apply_reading(123.0, &mut method),
+            state.apply_reading(100.0.into(), &mut method),
+            DeviceChange::None
+        );
+        assert_eq!(
+            state.apply_reading(123.0.into(), &mut method),
             DeviceChange::Added(DUMMY_DEVICE_CATALOG[0])
         );
         assert_eq!(
-            state.apply_reading(100.0, &mut method),
+            state.apply_reading(100.0.into(), &mut method),
             DeviceChange::Removed(DUMMY_DEVICE_CATALOG[0])
         );
         assert!(state.snapshot().active_devices.is_empty());
@@ -210,7 +405,7 @@ mod tests {
         let state = AppState {
             meter,
             decision_method: Arc::new(Mutex::new(Box::new(ClosestPowerMatch::new(3.0)))),
-            reading_decoder: Arc::new(crate::input::DummyJsonDecoder),
+            reading_decoder: Arc::new(crate::input::JsonReadingDecoder),
         };
 
         // First reading: baseline
