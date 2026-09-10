@@ -129,12 +129,12 @@ async fn main() -> anyhow::Result<()> {
         DecisionMethodArg::Settled => Box::new(decision::SettledPowerMatch::new(
             5.0, // Minimum change that can trigger a device-state update.
             3.0, // Consecutive readings must remain within +/- 3 W.
-            3,   // Count individual measurements, including those delivered in one batch.
-            5.0, // Maximum difference between the settled delta and table value.
+            1,   // 1 reading because client already filters noise and settles over a 2s window.
+            8.0, // Maximum difference between the settled delta and table value.
         )),
-        DecisionMethodArg::Immediate => Box::new(decision::ClosestPowerMatch::new(5.0)),
+        DecisionMethodArg::Immediate => Box::new(decision::ClosestPowerMatch::new(8.0)),
         DecisionMethodArg::MultiFeature => Box::new(
-            decision::SettledPowerMatch::with_pq_tolerances(5.0, 3.0, 3, 5.0, 10.0, 20.0),
+            decision::SettledPowerMatch::with_pq_tolerances(5.0, 3.0, 1, 8.0, 15.0, 30.0),
         ),
     };
     let decision_method: api::SharedDecisionMethod = Arc::new(Mutex::new(decision_method));

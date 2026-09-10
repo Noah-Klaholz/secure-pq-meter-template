@@ -9,6 +9,7 @@ pub const DUMMY_DEVICE_CATALOG: &[Device] = &[
     Device::with_pq("noah-macbook", "Macbook Air", 145.0, -15.0, 22.0),
     Device::with_pq("chris-handy", "Smartphone", 60.0, -12.0, 75.0),
     Device::with_pq("peter-laptop", "Laptop", 68.0, -6.0, 25.0),
+    Device::with_pq("device-80w", "80W Device", 80.0, -10.0, 122.8),
 ];
 
 /// A device whose presence can be inferred from its electrical signature.
@@ -964,4 +965,39 @@ mod tests {
         let change = method.decide_reading(Some(&r1), &r2, catalog, &[]);
         assert_eq!(change, DeviceChange::Added(LAPTOP));
     }
+
+    #[test]
+    fn detects_80w_device_from_real_world_measurements() {
+        let mut method = SettledPowerMatch::new(5.0, 3.0, 1, 8.0);
+
+        // Baseline (only Raspberry Pis): 24.74W, -35.97 var, 124.8% THD
+        let baseline = make_reading(24.74, -35.97, 124.8);
+        assert_eq!(
+            method.decide_reading(None, &baseline, DUMMY_DEVICE_CATALOG, &[]),
+            DeviceChange::None
+        );
+
+        // 80W Device + 2 Pis turned on: 108.44W, -49.53 var, 122.83% THD
+        let reading_80w = make_reading(108.44, -49.53, 122.83);
+        let change = method.decide_reading(Some(&baseline), &reading_80w, DUMMY_DEVICE_CATALOG, &[]);
+        assert_eq!(
+            change,
+            DeviceChange::Added(DUMMY_DEVICE_CATALOG[5])
+        );
+
+        // 80W Device turned off: back to baseline ~25.0W
+        let back_to_base = make_reading(25.0, -36.0, 124.5);
+        let active = [DUMMY_DEVICE_CATALOG[5]];
+        let change_off = method.decide_reading(
+            Some(&reading_80w),
+            &back_to_base,
+            DUMMY_DEVICE_CATALOG,
+            &active,
+        );
+        assert_eq!(
+            change_off,
+            DeviceChange::Removed(DUMMY_DEVICE_CATALOG[5])
+        );
+    }
 }
+
