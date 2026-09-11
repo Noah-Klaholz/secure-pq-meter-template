@@ -13,6 +13,7 @@ chrono = { workspace = true }
 clap = { workspace = true }
 pocketscion = { workspace = true }
 rcgen = { workspace = true }
+rusqlite = { workspace = true }
 scion-h3-axum = { workspace = true }
 scion-quic = { workspace = true }
 scion-sdk-utils = { workspace = true }
