@@ -3,10 +3,20 @@ import { createOverview } from './overview.js';
 
 const themeToggle = document.getElementById('theme-toggle');
 const themeStorageKey = 'pq-monitor-theme';
+const themeModes = new Set(['auto', 'light', 'dark']);
+let selectedTheme = 'auto';
 
-function applyTheme(theme) {
-  const dark = theme === 'dark';
-  document.documentElement.dataset.theme = theme;
+function resolveTheme(mode) {
+  return mode === 'auto'
+    ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : mode;
+}
+
+function applyTheme(mode) {
+  selectedTheme = themeModes.has(mode) ? mode : 'auto';
+  const resolvedTheme = resolveTheme(selectedTheme);
+  const dark = resolvedTheme === 'dark';
+  document.documentElement.dataset.theme = resolvedTheme;
   themeToggle.setAttribute('aria-pressed', String(dark));
   const label = dark ? 'Switch to light mode' : 'Switch to dark mode';
   themeToggle.setAttribute('aria-label', label);
@@ -18,18 +28,18 @@ function applyTheme(theme) {
 function initialTheme() {
   try {
     const saved = localStorage.getItem(themeStorageKey);
-    if (saved === 'light' || saved === 'dark') return saved;
+    if (themeModes.has(saved)) return saved;
   } catch {
   }
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  return 'auto';
 }
 
 applyTheme(initialTheme());
 themeToggle.addEventListener('click', () => {
-  const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-  applyTheme(theme);
+  const mode = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  applyTheme(mode);
   try {
-    localStorage.setItem(themeStorageKey, theme);
+    localStorage.setItem(themeStorageKey, mode);
   } catch {
   }
 });
