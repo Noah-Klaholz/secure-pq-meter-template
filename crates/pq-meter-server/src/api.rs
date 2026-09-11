@@ -290,12 +290,7 @@ mod tests {
         assert_eq!(state.meter.lock().unwrap().snapshot().readings_received, 2);
         drop(state);
         let mut history = History::bounded(600);
-        let (_, count) = HistoryStore::open_with_legacy(
-            &database,
-            &legacy,
-            &mut history,
-        )
-        .unwrap();
+        let (_, count) = HistoryStore::open_with_legacy(&database, &legacy, &mut history).unwrap();
         assert_eq!(count, 2);
         assert_eq!(history.all()[0].data.total_power, 100.0);
         assert!(history.all()[1].data.heartbeat);

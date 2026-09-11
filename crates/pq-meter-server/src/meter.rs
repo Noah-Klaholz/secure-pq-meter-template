@@ -86,11 +86,8 @@ impl MeterState {
         database_path: &std::path::Path,
         legacy_path: &std::path::Path,
     ) -> anyhow::Result<Self> {
-        let (store, count) = HistoryStore::open_with_legacy(
-            database_path,
-            legacy_path,
-            &mut self.history,
-        )?;
+        let (store, count) =
+            HistoryStore::open_with_legacy(database_path, legacy_path, &mut self.history)?;
         self.history_store = Some(store);
         self.stored_readings = count;
         Ok(self)

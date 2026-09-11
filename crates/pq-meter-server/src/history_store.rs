@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -41,8 +41,9 @@ impl HistoryStore {
         std::fs::create_dir_all(parent).context("creating history database directory")?;
         let connection = Connection::open(database_path)
             .with_context(|| format!("opening history database {}", database_path.display()))?;
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS measurements (
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS measurements (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 received_at TEXT NOT NULL,
                 received_at_epoch INTEGER NOT NULL,
@@ -57,8 +58,8 @@ impl HistoryStore {
                 source_hash TEXT NOT NULL,
                 imported_at TEXT NOT NULL
             );",
-        )
-        .context("initializing history database schema")?;
+            )
+            .context("initializing history database schema")?;
 
         if legacy_path.is_file() {
             Self::import_legacy(&connection, legacy_path)?;
@@ -103,12 +104,18 @@ impl HistoryStore {
             }
             let batch: StoredBatch = serde_json::from_slice(line)
                 .with_context(|| format!("invalid history batch at byte {committed_bytes}"))?;
-            anyhow::ensure!(batch.schema_version == 1, "unsupported history schema version");
+            anyhow::ensure!(
+                batch.schema_version == 1,
+                "unsupported history schema version"
+            );
             anyhow::ensure!(!batch.readings.is_empty(), "empty history batch");
             let at = DateTime::parse_from_rfc3339(&batch.received_at)
                 .context("invalid history timestamp")?
                 .with_timezone(&Utc);
-            anyhow::ensure!(last_at.is_none_or(|last| at >= last), "history timestamps are out of order");
+            anyhow::ensure!(
+                last_at.is_none_or(|last| at >= last),
+                "history timestamps are out of order"
+            );
             last_at = Some(at);
             insert_readings(&transaction, &batch.readings, at)?;
             imported += batch.readings.len();
@@ -119,7 +126,9 @@ impl HistoryStore {
              VALUES (?1, ?2, ?3)",
             params![key.as_ref(), source_hash, Utc::now().to_rfc3339()],
         )?;
-        transaction.commit().context("committing legacy history migration")?;
+        transaction
+            .commit()
+            .context("committing legacy history migration")?;
         tracing::info!(path = %path.display(), imported, "imported legacy measurement history into SQLite");
         Ok(())
     }
@@ -157,7 +166,9 @@ impl HistoryStore {
             .transaction()
             .context("starting history transaction")?;
         insert_readings(&transaction, readings, at)?;
-        transaction.commit().context("committing measurement history")?;
+        transaction
+            .commit()
+            .context("committing measurement history")?;
         Ok(())
     }
 
@@ -165,11 +176,11 @@ impl HistoryStore {
         &self,
         window: std::time::Duration,
     ) -> anyhow::Result<Vec<HistoryEntry<MeterReading>>> {
-        let newest: Option<i64> = self
-            .connection
-            .query_row("SELECT MAX(received_at_epoch) FROM measurements", [], |row| {
-                row.get(0)
-            })?;
+        let newest: Option<i64> = self.connection.query_row(
+            "SELECT MAX(received_at_epoch) FROM measurements",
+            [],
+            |row| row.get(0),
+        )?;
         let Some(newest) = newest else {
             return Ok(Vec::new());
         };
@@ -243,7 +254,11 @@ mod tests {
     fn creates_database_and_preserves_complete_measurements_across_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.db");
-        let reading = MeterReading { frequency_hz: Some(49.95), heartbeat: true, ..123.0.into() };
+        let reading = MeterReading {
+            frequency_hz: Some(49.95),
+            heartbeat: true,
+            ..123.0.into()
+        };
         let (mut store, count) = HistoryStore::open_with_legacy(
             &path,
             &path.with_extension("jsonl"),
@@ -254,7 +269,9 @@ mod tests {
         store.append(&[reading], timestamp()).unwrap();
         drop(store);
         let mut cache = History::bounded(10);
-        let (_, count) = HistoryStore::open_with_legacy(&path, &path.with_extension("jsonl"), &mut cache).unwrap();
+        let (_, count) =
+            HistoryStore::open_with_legacy(&path, &path.with_extension("jsonl"), &mut cache)
+                .unwrap();
         assert_eq!(count, 1);
         assert_eq!(cache.latest().unwrap().data, reading);
     }
@@ -269,10 +286,16 @@ mod tests {
             received_at: timestamp().to_rfc3339(),
             readings: vec![100.0.into(), 200.0.into()],
         };
-        std::fs::write(&legacy, format!("{}\n", serde_json::to_string(&batch).unwrap())).unwrap();
-        let (_, count) = HistoryStore::open_with_legacy(&database, &legacy, &mut History::bounded(10)).unwrap();
+        std::fs::write(
+            &legacy,
+            format!("{}\n", serde_json::to_string(&batch).unwrap()),
+        )
+        .unwrap();
+        let (_, count) =
+            HistoryStore::open_with_legacy(&database, &legacy, &mut History::bounded(10)).unwrap();
         assert_eq!(count, 2);
-        let (_, count) = HistoryStore::open_with_legacy(&database, &legacy, &mut History::bounded(10)).unwrap();
+        let (_, count) =
+            HistoryStore::open_with_legacy(&database, &legacy, &mut History::bounded(10)).unwrap();
         assert_eq!(count, 2);
     }
 
@@ -309,12 +332,9 @@ mod tests {
         let contents = b"not json\n";
         std::fs::write(&legacy, contents).unwrap();
 
-        assert!(HistoryStore::open_with_legacy(
-            &database,
-            &legacy,
-            &mut History::bounded(10),
-        )
-        .is_err());
+        assert!(
+            HistoryStore::open_with_legacy(&database, &legacy, &mut History::bounded(10),).is_err()
+        );
         assert_eq!(std::fs::read(&legacy).unwrap(), contents);
     }
 }

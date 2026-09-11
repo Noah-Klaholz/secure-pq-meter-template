@@ -558,12 +558,8 @@ async fn history_survives_long_downtime_without_replaying_live_state() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("history.db");
     let legacy = directory.path().join("history.jsonl");
-    let (mut archive, _) = HistoryStore::open_with_legacy(
-        &database,
-        &legacy,
-        &mut History::bounded(600),
-    )
-    .unwrap();
+    let (mut archive, _) =
+        HistoryStore::open_with_legacy(&database, &legacy, &mut History::bounded(600)).unwrap();
     let at = chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
