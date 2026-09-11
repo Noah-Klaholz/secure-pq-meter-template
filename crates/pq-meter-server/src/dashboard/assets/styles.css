@@ -414,6 +414,35 @@ h1 {
   line-height:1.5;
 }
 
+.supply-status-line {
+  margin:14px 0;
+}
+
+#supply-status.neutral:before {
+  background:transparent;
+  border:1px solid currentColor;
+}
+
+.supply-details {
+  display:grid;
+  gap:10px;
+  margin:0;
+  line-height:1.5;
+}
+
+.supply-details dt {
+  font-size:11px;
+  color:var(--muted);
+}
+
+.supply-details dd {
+  margin:2px 0 0;
+  font-size:13px;
+  font-weight:600;
+  font-variant-numeric:tabular-nums;
+  overflow-wrap:anywhere;
+}
+
 .detail-grid {
   display:grid;
   grid-template-columns:minmax(0,1.8fr) minmax(270px,1fr);

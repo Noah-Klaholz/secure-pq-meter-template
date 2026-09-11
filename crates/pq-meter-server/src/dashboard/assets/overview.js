@@ -235,11 +235,11 @@ export function createOverview({ onRename } = {}) {
       // Supply status summarises the events below.
       const breaches = violations.filter(v => v.severity === 'violation').length;
       const warnings = violations.length - breaches;
-      text('supply-status', !hasAnomaly ? 'Waiting' : anomaly.is_anomaly ? 'ANOMALY' : 'NORMAL');
-      byId('supply-status').className = !hasAnomaly ? '' : anomaly.is_anomaly ? 'breach-text' : 'positive-text';
-      text('supply-note', hasAnomaly
-        ? `Anomaly score: ${show(anomaly.score, 2)} · Strongest feature: ${anomalyFeatureLabel(anomaly.strongest_feature)}`
-        : 'Anomaly score: — · Strongest feature: —');
+      badge(byId('supply-status'),
+        !hasAnomaly ? 'NO DATA' : anomaly.is_anomaly ? 'ANOMALY' : 'NORMAL',
+        !hasAnomaly ? 'neutral' : anomaly.is_anomaly ? 'negative' : 'positive');
+      text('supply-score', hasAnomaly && Number.isFinite(anomaly.score) ? show(anomaly.score, 2) : '—');
+      text('supply-feature', hasAnomaly ? anomalyFeatureLabel(anomaly.strongest_feature) : '—');
 
       // Phases.
       const phaseRows = (pq.phases ?? []).map(phase => {
