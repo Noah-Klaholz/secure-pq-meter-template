@@ -29,16 +29,6 @@ pub struct HistoryStore {
 }
 
 impl HistoryStore {
-    #[allow(dead_code)]
-    pub fn open(path: &Path, history: &mut History<MeterReading>) -> anyhow::Result<(Self, u64)> {
-        let (database_path, legacy_path) = if path.extension().is_some_and(|ext| ext == "jsonl") {
-            (path.with_extension("db"), path.to_owned())
-        } else {
-            (path.to_owned(), path.with_extension("jsonl"))
-        };
-        Self::open_with_legacy(&database_path, &legacy_path, history)
-    }
-
     pub fn open_with_legacy(
         database_path: &Path,
         legacy_path: &Path,
@@ -254,12 +244,17 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.db");
         let reading = MeterReading { frequency_hz: Some(49.95), heartbeat: true, ..123.0.into() };
-        let (mut store, count) = HistoryStore::open(&path, &mut History::bounded(10)).unwrap();
+        let (mut store, count) = HistoryStore::open_with_legacy(
+            &path,
+            &path.with_extension("jsonl"),
+            &mut History::bounded(10),
+        )
+        .unwrap();
         assert_eq!(count, 0);
         store.append(&[reading], timestamp()).unwrap();
         drop(store);
         let mut cache = History::bounded(10);
-        let (_, count) = HistoryStore::open(&path, &mut cache).unwrap();
+        let (_, count) = HistoryStore::open_with_legacy(&path, &path.with_extension("jsonl"), &mut cache).unwrap();
         assert_eq!(count, 1);
         assert_eq!(cache.latest().unwrap().data, reading);
     }
@@ -285,7 +280,12 @@ mod tests {
     fn recent_returns_the_newest_window_in_oldest_first_order() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.db");
-        let (mut store, _) = HistoryStore::open(&path, &mut History::bounded(10)).unwrap();
+        let (mut store, _) = HistoryStore::open_with_legacy(
+            &path,
+            &path.with_extension("jsonl"),
+            &mut History::bounded(10),
+        )
+        .unwrap();
         let first = timestamp();
         store.append(&[100.0.into()], first).unwrap();
         store
