@@ -341,6 +341,7 @@ impl SnapshotSource for LiveMeterSource {
             .map_err(|_| "meter state is unavailable")?;
         let samples = meter
             .recent_history()
+            .map_err(|_| "history is unavailable")?
             .iter()
             .map(|entry| {
                 let reading = entry.data;

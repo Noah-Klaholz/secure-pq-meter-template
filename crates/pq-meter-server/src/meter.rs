@@ -81,8 +81,16 @@ impl MeterState {
         self.latest_forecast.clone()
     }
 
-    pub fn with_history_file(mut self, path: &std::path::Path) -> anyhow::Result<Self> {
-        let (store, count) = HistoryStore::open(path, &mut self.history)?;
+    pub fn with_history_file(
+        mut self,
+        database_path: &std::path::Path,
+        legacy_path: &std::path::Path,
+    ) -> anyhow::Result<Self> {
+        let (store, count) = HistoryStore::open_with_legacy(
+            database_path,
+            legacy_path,
+            &mut self.history,
+        )?;
         self.history_store = Some(store);
         self.stored_readings = count;
         Ok(self)
@@ -141,16 +149,35 @@ impl MeterState {
     }
 
     /// The last recorded window stays visible during downtime and after a restart.
-    pub fn recent_history(&self) -> &[HistoryEntry<MeterReading>] {
+    pub fn recent_history(&self) -> anyhow::Result<Vec<HistoryEntry<MeterReading>>> {
+        if let Some(store) = &self.history_store {
+            return store.recent(HISTORY_WINDOW);
+        }
         let Some(latest) = self.history.latest() else {
-            return self.history.all();
+            return Ok(self
+                .history
+                .all()
+                .iter()
+                .map(|entry| HistoryEntry {
+                    timestamp: entry.timestamp,
+                    data: entry.data,
+                })
+                .collect());
         };
-        self.history.since(
-            latest
-                .timestamp
-                .checked_sub(HISTORY_WINDOW)
-                .unwrap_or(latest.timestamp),
-        )
+        Ok(self
+            .history
+            .since(
+                latest
+                    .timestamp
+                    .checked_sub(HISTORY_WINDOW)
+                    .unwrap_or(latest.timestamp),
+            )
+            .iter()
+            .map(|entry| HistoryEntry {
+                timestamp: entry.timestamp,
+                data: entry.data,
+            })
+            .collect())
     }
 
     pub fn latest_power(&self) -> Option<f32> {

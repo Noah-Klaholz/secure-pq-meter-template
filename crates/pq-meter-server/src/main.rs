@@ -64,9 +64,13 @@ struct Args {
     #[arg(long, default_value = "device-labels.json")]
     device_labels_file: std::path::PathBuf,
 
-    /// Append-only measurement archive, restored when the receiver starts.
-    #[arg(long, default_value = "measurement-history.jsonl")]
+    /// SQLite measurement archive, restored when the receiver starts.
+    #[arg(long, default_value = "data/history.db")]
     history_file: std::path::PathBuf,
+
+    /// Legacy JSONL archive imported into SQLite on first startup.
+    #[arg(long, default_value = "measurement-history.jsonl")]
+    legacy_history_file: std::path::PathBuf,
 
     /// Run the receiver without the local web dashboard.
     #[arg(long)]
@@ -162,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let meter = Arc::new(Mutex::new(
         meter::MeterState::with_labels(seed_catalog, labels)
-            .with_history_file(&args.history_file)?,
+            .with_history_file(&args.history_file, &args.legacy_history_file)?,
     ));
     let decision_method: api::SharedDecisionMethod = Arc::new(Mutex::new(decision_method));
     let reading_decoder: input::SharedReadingDecoder = Arc::new(input::JsonReadingDecoder);
@@ -256,6 +260,10 @@ mod tests {
         );
         assert_eq!(
             args.history_file,
+            std::path::PathBuf::from("data/history.db")
+        );
+        assert_eq!(
+            args.legacy_history_file,
             std::path::PathBuf::from("measurement-history.jsonl")
         );
         assert!(!args.no_dashboard);

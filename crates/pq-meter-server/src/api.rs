@@ -258,11 +258,12 @@ mod tests {
     async fn accepted_batches_survive_restart_and_rejected_batches_never_reach_disk() {
         use crate::{history::History, history_store::HistoryStore, labels::DeviceLabels};
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("history.jsonl");
+        let database = directory.path().join("history.db");
+        let legacy = directory.path().join("history.jsonl");
         let state = AppState {
             meter: Arc::new(Mutex::new(
                 MeterState::with_labels(DUMMY_DEVICE_CATALOG.to_vec(), DeviceLabels::default())
-                    .with_history_file(&path)
+                    .with_history_file(&database, &legacy)
                     .unwrap(),
             )),
             decision_method: Arc::new(Mutex::new(Box::new(ClosestPowerMatch::new(3.0)))),
@@ -276,7 +277,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let committed = std::fs::read(&path).unwrap();
+        let committed = std::fs::read(&database).unwrap();
         let (status, _) = post_json(
             state.clone(),
             serde_json::json!([
@@ -285,11 +286,11 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(std::fs::read(&path).unwrap(), committed);
+        assert_eq!(std::fs::read(&database).unwrap(), committed);
         assert_eq!(state.meter.lock().unwrap().snapshot().readings_received, 2);
         drop(state);
         let mut history = History::bounded(600);
-        let (_, count) = HistoryStore::open(&path, &mut history).unwrap();
+        let (_, count) = HistoryStore::open(&database, &mut history).unwrap();
         assert_eq!(count, 2);
         assert_eq!(history.all()[0].data.total_power, 100.0);
         assert!(history.all()[1].data.heartbeat);
