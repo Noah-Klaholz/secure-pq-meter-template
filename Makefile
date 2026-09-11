@@ -84,11 +84,14 @@ build-client-local:
 	@echo "Building client for the local machine..."
 	cargo build -p pq-meter-client
 
-# Cross compilation. `cross` runs the build in a container and needs Docker or Podman;
-# without it, fall back to the host toolchain, which needs an aarch64 GCC and binutils
-# (Debian/Ubuntu: gcc-aarch64-linux-gnu, Arch: aarch64-linux-gnu-gcc) plus the Rust std
-# for the target. cc-rs looks for `aarch64-linux-gnu-ar`, which some distributions do not
-# ship, so point it at llvm-ar when that is the case.
+# Cross compilation, in order of preference:
+#   1. `cross` (cross-rs) - runs the build in a container, needs Docker or Podman.
+#   2. `cargo cross` (the `cargo-cross` crate) - downloads its own toolchain, no
+#      container runtime. This is the one that works out of the box on macOS.
+#   3. the host toolchain - needs an aarch64 GCC and binutils (Debian/Ubuntu:
+#      gcc-aarch64-linux-gnu, Arch: aarch64-linux-gnu-gcc) plus the Rust std for
+#      the target. cc-rs looks for `aarch64-linux-gnu-ar`, which some distributions
+#      do not ship, so point it at llvm-ar when that is the case.
 AARCH64_ENV := \
 	CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
 	CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
@@ -100,8 +103,10 @@ build-client:
 	@echo "Cross-compiling client for Raspberry Pi (aarch64)..."
 	@if command -v cross >/dev/null 2>&1; then \
 		cross build --release -p pq-meter-client --target aarch64-unknown-linux-gnu; \
+	elif cargo cross version >/dev/null 2>&1; then \
+		cargo cross build --release -p pq-meter-client --target aarch64-unknown-linux-gnu; \
 	else \
-		echo "'cross' not installed; building with the host toolchain."; \
+		echo "neither 'cross' nor 'cargo cross' found; building with the host toolchain."; \
 		$(AARCH64_ENV) cargo build --release -p pq-meter-client --target aarch64-unknown-linux-gnu; \
 	fi
 
@@ -123,8 +128,10 @@ build-pinger:
 	@echo "Cross-compiling pinger for Raspberry Pi (aarch64)..."
 	@if command -v cross >/dev/null 2>&1; then \
 		cross build --release -p umg605-modbus-client --bin pinger --target aarch64-unknown-linux-gnu; \
+	elif cargo cross version >/dev/null 2>&1; then \
+		cargo cross build --release -p umg605-modbus-client --bin pinger --target aarch64-unknown-linux-gnu; \
 	else \
-		echo "'cross' not installed; building with the host toolchain."; \
+		echo "neither 'cross' nor 'cargo cross' found; building with the host toolchain."; \
 		$(AARCH64_ENV) cargo build --release -p umg605-modbus-client --bin pinger --target aarch64-unknown-linux-gnu; \
 	fi
 
