@@ -17,6 +17,14 @@ lint:
 
 test:
 	cargo test --workspace
+	@if command -v uv >/dev/null 2>&1; then \
+		echo "Running ML tests with uv..."; \
+		(cd ml && uv run python -m unittest discover -p "test_*.py"); \
+	else \
+		echo "Running ML tests with python3..."; \
+		(cd ml && python3 -m unittest discover -p "test_*.py"); \
+	fi
+
 
 OS := $(shell uname -s)
 

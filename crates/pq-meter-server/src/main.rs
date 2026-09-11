@@ -77,7 +77,7 @@ struct Args {
     no_forecast: bool,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum DecisionMethodArg {
     /// Training-free online NILM: learn the idle background, then fingerprint each
     /// settled step change in P-Q-distortion space and match or add a device.
@@ -237,4 +237,90 @@ fn spawn_forecaster(server_url: &str) -> anyhow::Result<tokio::process::Child> {
 
     let child = cmd.spawn().context("spawning online forecaster")?;
     Ok(child)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_default_arguments() {
+        let args = Args::try_parse_from(["pq-meter-server"]).unwrap();
+        assert_eq!(args.bind_ip, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(args.path, api::DEFAULT_PATH);
+        assert_eq!(args.decision_method, DecisionMethodArg::Adaptive);
+        assert_eq!(args.dashboard_port, 8080);
+        assert_eq!(
+            args.device_labels_file,
+            std::path::PathBuf::from("device-labels.json")
+        );
+        assert_eq!(
+            args.history_file,
+            std::path::PathBuf::from("measurement-history.jsonl")
+        );
+        assert!(!args.no_dashboard);
+        assert!(!args.no_forecast);
+    }
+
+    #[test]
+    fn parses_custom_arguments() {
+        let args = Args::try_parse_from([
+            "pq-meter-server",
+            "--bind-ip",
+            "192.168.1.50",
+            "--path",
+            "/custom/ingest",
+            "--decision-method",
+            "settled",
+            "--dashboard-port",
+            "9090",
+            "--device-labels-file",
+            "/tmp/custom-labels.json",
+            "--history-file",
+            "/tmp/custom-history.jsonl",
+            "--no-dashboard",
+            "--no-forecast",
+        ])
+        .unwrap();
+
+        assert_eq!(args.bind_ip, "192.168.1.50".parse::<IpAddr>().unwrap());
+        assert_eq!(args.path, "/custom/ingest");
+        assert_eq!(args.decision_method, DecisionMethodArg::Settled);
+        assert_eq!(args.dashboard_port, 9090);
+        assert_eq!(
+            args.device_labels_file,
+            std::path::PathBuf::from("/tmp/custom-labels.json")
+        );
+        assert_eq!(
+            args.history_file,
+            std::path::PathBuf::from("/tmp/custom-history.jsonl")
+        );
+        assert!(args.no_dashboard);
+        assert!(args.no_forecast);
+    }
+
+    #[test]
+    fn parses_all_decision_methods() {
+        for (flag, expected) in [
+            ("adaptive", DecisionMethodArg::Adaptive),
+            ("settled", DecisionMethodArg::Settled),
+            ("immediate", DecisionMethodArg::Immediate),
+            ("multi-feature", DecisionMethodArg::MultiFeature),
+        ] {
+            let args =
+                Args::try_parse_from(["pq-meter-server", "--decision-method", flag]).unwrap();
+            assert_eq!(args.decision_method, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_arguments() {
+        assert!(Args::try_parse_from(["pq-meter-server", "--bind-ip", "not-an-ip"]).is_err());
+        assert!(
+            Args::try_parse_from(["pq-meter-server", "--decision-method", "invalid-method"])
+                .is_err()
+        );
+        assert!(Args::try_parse_from(["pq-meter-server", "--dashboard-port", "invalid"]).is_err());
+        assert!(Args::try_parse_from(["pq-meter-server", "--dashboard-port", "70000"]).is_err());
+    }
 }

@@ -102,6 +102,22 @@ class OnlineLoadForecaster:
 
     def update_with_actual(self, actual_timestamp: float, actual_power: float):
         """Pairs historical predictions with ground truth as time advances."""
+        # Detect step events / sudden appliance switching on the incoming ground truth
+        if self.last_settled_power is not None:
+            step = actual_power - self.last_settled_power
+            if abs(step) >= self.step_threshold_watts:
+                self.drifts_detected += 1
+                action = "Appliance ADDED" if step > 0 else "Appliance REMOVED"
+                logger.info(
+                    "⚡ Step Event: %s (ΔP: %+5.1f W, New level: %.1f W). Online model adapting!",
+                    action,
+                    step,
+                    actual_power,
+                )
+                self.last_settled_power = actual_power
+        else:
+            self.last_settled_power = actual_power
+
         while self.pending_feedback and self.pending_feedback[0][0] <= actual_timestamp:
             due_at, features, base_power, predicted_delta = self.pending_feedback.popleft()
             actual_delta = actual_power - base_power
@@ -112,22 +128,6 @@ class OnlineLoadForecaster:
             predicted_power = base_power + predicted_delta
             self.mae.update(actual_power, predicted_power)
             self.samples_learned += 1
-
-            # Detect step events / sudden appliance switching
-            if self.last_settled_power is not None:
-                step = actual_power - self.last_settled_power
-                if abs(step) >= self.step_threshold_watts:
-                    self.drifts_detected += 1
-                    action = "Appliance ADDED" if step > 0 else "Appliance REMOVED"
-                    logger.info(
-                        "⚡ Step Event: %s (ΔP: %+5.1f W, New level: %.1f W). Online model adapting!",
-                        action,
-                        step,
-                        actual_power,
-                    )
-                    self.last_settled_power = actual_power
-            else:
-                self.last_settled_power = actual_power
 
     def forecast(
         self, current: Dict[str, Any], current_timestamp: float
@@ -159,13 +159,18 @@ class OnlineLoadForecaster:
             offset = step * self.step_seconds
             t_future = current_dt + datetime.timedelta(seconds=offset)
             alpha = min(1.0, offset / self.horizon_seconds)
-            # Projected power value
-            val = max(0.0, current_power + alpha * predicted_delta)
+            # Projected power value (preserve negative power for exporting installations)
+            val = current_power + alpha * predicted_delta
+            if current_power >= 0.0:
+                val = max(0.0, val)
+                lower_bound = max(0.0, val - 1.96 * uncertainty)
+            else:
+                lower_bound = val - 1.96 * uncertainty
 
             points.append({
                 "at": t_future.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "predicted_watts": round(val, 2),
-                "lower_bound_watts": round(max(0.0, val - 1.96 * uncertainty), 2),
+                "lower_bound_watts": round(lower_bound, 2),
                 "upper_bound_watts": round(val + 1.96 * uncertainty, 2),
             })
 
@@ -189,6 +194,7 @@ def warm_start_from_history(forecaster: OnlineLoadForecaster, history_path: str)
 
     logger.info("Warm-starting online model from history archive: %s", history_path)
     count = 0
+    simulated_time = 0.0
     with open(history_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -197,23 +203,41 @@ def warm_start_from_history(forecaster: OnlineLoadForecaster, history_path: str)
             try:
                 batch = json.loads(line)
                 readings = batch.get("readings", [])
-                base_time = time.time()
+                at_str = batch.get("received_at")
+                if at_str:
+                    try:
+                        batch_time = datetime.datetime.fromisoformat(at_str).timestamp()
+                    except Exception:
+                        batch_time = simulated_time
+                else:
+                    batch_time = simulated_time
+
                 for r in readings:
-                    forecaster.update_with_actual(base_time, float(r.get("total_power", 0.0)))
+                    p = float(r.get("total_power", 0.0))
+                    forecaster.update_with_actual(batch_time, p)
                     forecaster.forecast(
                         {
-                            "total_power_watts": r.get("total_power", 0.0),
+                            "total_power_watts": p,
                             "frequency_hz": r.get("frequency_hz"),
                             "voltage_v": [r.get("l1", {}).get("voltage_v")],
                             "current_a": [r.get("l1", {}).get("current_a")],
                             "thd_current_pct": [r.get("l1", {}).get("thd_current_pct")],
                         },
-                        base_time,
+                        batch_time,
                     )
                     count += 1
+                    batch_time += 1.0
+                simulated_time = max(simulated_time + len(readings), batch_time)
             except Exception as e:
                 logger.debug("Skipping line: %s", e)
-    logger.info("Warm-start finished with %d measurements. MAE: %.2f W", count, forecaster.mae.get())
+
+    # Flush pending feedback with final settled power so the model learns from historical tail
+    if forecaster.pending_feedback and forecaster.last_settled_power is not None:
+        final_time = forecaster.pending_feedback[-1][0]
+        forecaster.update_with_actual(final_time, forecaster.last_settled_power)
+
+    mae_str = f"{forecaster.mae.get():.2f} W" if forecaster.samples_learned > 0 else "N/A"
+    logger.info("Warm-start finished with %d measurements (learned %d updates). MAE: %s", count, forecaster.samples_learned, mae_str)
 
 
 def run_predictor(
