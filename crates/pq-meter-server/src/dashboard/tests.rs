@@ -80,7 +80,7 @@ fn snapshot_tracks_baseline_addition_removal_and_preserves_last_change() {
 #[tokio::test]
 async fn http_snapshot_is_versioned_read_only_and_uncached() {
     let source = source();
-    let app = router(source.clone());
+    let app = router(source.clone(), Arc::new(Mutex::new(None)));
     let response = app
         .clone()
         .oneshot(Request::get("/api/v1/state").body(Body::empty()).unwrap())
@@ -137,7 +137,7 @@ async fn history_returns_oldest_first_dashboard_series() {
     assert_eq!(series.samples[1].total_power_watts, 456.0);
     assert_eq!(series.samples[1].voltage_v[0], Some(239.99));
 
-    let response = router(source)
+    let response = router(source, Arc::new(Mutex::new(None)))
         .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -156,7 +156,7 @@ async fn history_returns_oldest_first_dashboard_series() {
 
 #[tokio::test]
 async fn assets_have_correct_types_and_unknown_paths_return_not_found() {
-    let app = router(source());
+    let app = router(source(), Arc::new(Mutex::new(None)));
     for (path, content_type) in [
         ("/", "text/html; charset=utf-8"),
         ("/assets/styles.css", "text/css; charset=utf-8"),
@@ -202,7 +202,7 @@ async fn unavailable_source_returns_json_error_instead_of_empty_measurements() {
             Err("meter state is unavailable")
         }
     }
-    let response = router(Arc::new(Unavailable))
+    let response = router(Arc::new(Unavailable), Arc::new(Mutex::new(None)))
         .oneshot(Request::get("/api/v1/state").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -391,7 +391,7 @@ async fn history_endpoint_is_versioned_and_separate_from_the_live_snapshot() {
         .unwrap()
         .apply_reading(lab_reading(500.0, 230.0, 50.0), &mut method);
 
-    let response = router(source)
+    let response = router(source, Arc::new(Mutex::new(None)))
         .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -414,7 +414,7 @@ async fn an_unavailable_source_fails_the_history_endpoint_too() {
             Err("meter state is unavailable")
         }
     }
-    let response = router(Arc::new(Unavailable))
+    let response = router(Arc::new(Unavailable), Arc::new(Mutex::new(None)))
         .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -449,7 +449,7 @@ async fn rename_persists_and_updates_devices_and_last_change_without_changing_de
             .apply_reading(power.into(), &mut method);
     }
     let id = DUMMY_DEVICE_CATALOG[0].id;
-    let response = router(source.clone())
+    let response = router(source.clone(), Arc::new(Mutex::new(None)))
         .oneshot(rename_request(id, "  Büro & Server <1>  "))
         .await
         .unwrap();
@@ -488,7 +488,7 @@ async fn rename_persists_and_updates_devices_and_last_change_without_changing_de
 #[tokio::test]
 async fn rename_rejects_invalid_names_unknown_ids_and_reports_failed_persistence() {
     let source = source();
-    let app = router(source.clone());
+    let app = router(source.clone(), Arc::new(Mutex::new(None)));
     let id = DUMMY_DEVICE_CATALOG[0].id;
     for name in [
         "".to_owned(),
@@ -579,7 +579,7 @@ async fn history_survives_long_downtime_without_replaying_live_state() {
         )),
         decision_method: "immediate",
     });
-    let response = router(source.clone())
+    let response = router(source.clone(), Arc::new(Mutex::new(None)))
         .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
         .await
         .unwrap();

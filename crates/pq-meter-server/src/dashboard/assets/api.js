@@ -36,3 +36,21 @@ export async function renameDevice(id, name) {
     clearTimeout(timeout);
   }
 }
+
+export async function syncSettings(config) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch('/api/v1/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+      signal: controller.signal,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Failed to queue settings.');
+    return payload;
+  } finally {
+    clearTimeout(timeout);
+  }
+}

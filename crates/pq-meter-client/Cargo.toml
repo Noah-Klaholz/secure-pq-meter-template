@@ -13,6 +13,7 @@ scion-http3 = { workspace = true }
 scion-sdk-utils = { workspace = true }
 scion-stack = { workspace = true }
 sciparse = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 snap-tokens = { workspace = true }
 tokio = { workspace = true }

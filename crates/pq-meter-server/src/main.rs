@@ -192,12 +192,14 @@ async fn main() -> anyhow::Result<()> {
             DecisionMethodArg::MultiFeature => "multi-feature",
         },
     });
+    let pending_config = Arc::new(Mutex::new(None));
     let receiver = api::serve(
         Arc::new(socket) as Arc<dyn GenericScionUdpSocket>,
         &args.path,
         meter,
         decision_method,
         reading_decoder,
+        pending_config.clone(),
     );
     if let Some(listener) = dashboard_listener {
         let local_addr = listener.local_addr()?;
@@ -222,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
         // Both services share a lifetime; propagate errors instead of losing a background task.
         tokio::select! {
             result = receiver => result,
-            result = dashboard::serve(listener, dashboard_source) => result,
+            result = dashboard::serve(listener, dashboard_source, pending_config) => result,
         }
     } else {
         receiver.await
