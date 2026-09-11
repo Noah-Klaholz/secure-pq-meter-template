@@ -32,4 +32,5 @@ janitza-mal-umg605pro-en.pdf
 **/__pycache__/
 *.pyc
 
+# Datebase files
 /data/
