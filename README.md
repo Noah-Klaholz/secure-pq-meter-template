@@ -1,4 +1,4 @@
-# Secure power quality metering via SCION — starter template
+# Secure power quality metering via SCION
 
 This repository is the starting point for the *Secure Power Quality Metering via SCION*
 challenge at the [Energy Data Hackdays](https://www.energydatahackdays.ch/). It contains
