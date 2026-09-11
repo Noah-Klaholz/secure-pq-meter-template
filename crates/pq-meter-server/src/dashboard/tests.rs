@@ -556,8 +556,9 @@ fn saved_adaptive_identities_survive_restart_and_a_different_connection_order() 
 async fn history_survives_long_downtime_without_replaying_live_state() {
     use crate::{history::History, history_store::HistoryStore, labels::DeviceLabels};
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("history.jsonl");
-    let (mut archive, _) = HistoryStore::open(&path, &mut History::bounded(600)).unwrap();
+    let database = directory.path().join("history.db");
+    let legacy = directory.path().join("history.jsonl");
+    let (mut archive, _) = HistoryStore::open(&database, &mut History::bounded(600)).unwrap();
     let at = chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
@@ -568,7 +569,7 @@ async fn history_survives_long_downtime_without_replaying_live_state() {
     let source = Arc::new(LiveMeterSource {
         meter: Arc::new(Mutex::new(
             MeterState::with_labels(DUMMY_DEVICE_CATALOG.to_vec(), DeviceLabels::default())
-                .with_history_file(&path)
+                .with_history_file(&database, &legacy)
                 .unwrap(),
         )),
         decision_method: "immediate",
