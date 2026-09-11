@@ -77,7 +77,8 @@ async fn anomaly_updates_reach_the_live_snapshot_and_can_be_cleared() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let value: serde_json::Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap())
+                .unwrap();
         assert_eq!(value["power_quality"]["anomaly"], payload);
     }
 }

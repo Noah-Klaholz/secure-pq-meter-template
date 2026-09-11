@@ -108,7 +108,8 @@ fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
 async fn current_state(State(state): State<DashboardAppState>) -> impl IntoResponse {
     match state.source.snapshot() {
         Ok(mut snapshot) => {
-            snapshot.power_quality.anomaly = state.anomaly.lock().ok().and_then(|status| status.clone());
+            snapshot.power_quality.anomaly =
+                state.anomaly.lock().ok().and_then(|status| status.clone());
             Json(snapshot).into_response()
         }
         Err(message) => unavailable(message),
