@@ -13,6 +13,22 @@ from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
+MIN_VALID_SAMPLES = 30
+DEFAULT_THRESHOLD = 3.5
+PRIMARY_FEATURES = (
+    "total_power",
+    "delta_total_power",
+    "l1.current_a",
+    "l1.thd_current_pct",
+    "frequency_hz",
+)
+OPTIONAL_FEATURES = (
+    "l1.reactive_power_var",
+    "l1.cos_phi",
+    "l1.voltage_v",
+)
+FEATURES = PRIMARY_FEATURES + OPTIONAL_FEATURES
+
 
 def _timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str):
@@ -152,6 +168,140 @@ def load_combined_history(
 ) -> list[dict[str, Any]]:
     """Load both sources, preserving JSONL precedence for duplicate records."""
     return combine_measurements(load_jsonl_history(jsonl_path), load_sqlite_history(sqlite_path))
+
+
+def extract_features(
+    measurement: dict[str, Any], previous: dict[str, Any] | None = None
+) -> dict[str, float]:
+    """Extract only valid physical features from one normalized measurement."""
+    features: dict[str, float] = {}
+    total_power = _number(measurement.get("total_power"))
+    if total_power is not None:
+        features["total_power"] = total_power
+    if previous is not None:
+        previous_power = _number(previous.get("total_power"))
+        if total_power is not None and previous_power is not None:
+            features["delta_total_power"] = total_power - previous_power
+
+    for name in ("frequency_hz",):
+        value = _number(measurement.get(name))
+        if value is not None:
+            features[name] = value
+    l1 = measurement.get("l1")
+    if isinstance(l1, dict):
+        for name in (
+            "current_a",
+            "thd_current_pct",
+            "reactive_power_var",
+            "cos_phi",
+            "voltage_v",
+        ):
+            value = _number(l1.get(name))
+            if value is not None:
+                features[f"l1.{name}"] = value
+    return features
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def build_baseline(
+    measurements: Iterable[dict[str, Any]],
+    min_valid_samples: int = MIN_VALID_SAMPLES,
+) -> dict[str, dict[str, float | int]]:
+    """Build immutable median/MAD statistics for features with enough samples."""
+    values: dict[str, list[float]] = {feature: [] for feature in FEATURES}
+    previous = None
+    for measurement in measurements:
+        extracted = extract_features(measurement, previous)
+        for feature, value in extracted.items():
+            values[feature].append(value)
+        previous = measurement
+
+    baseline: dict[str, dict[str, float | int]] = {}
+    for feature, feature_values in values.items():
+        if len(feature_values) < min_valid_samples:
+            continue
+        median = _median(feature_values)
+        mad = _median([abs(value - median) for value in feature_values])
+        if mad == 0.0:
+            variance = sum((value - median) ** 2 for value in feature_values) / len(feature_values)
+            scale = variance**0.5
+        else:
+            scale = mad
+        baseline[feature] = {
+            "median": median,
+            "mad": mad,
+            "scale": scale,
+            "count": len(feature_values),
+        }
+    return baseline
+
+
+def _robust_score(value: float, statistics: dict[str, float | int]) -> float:
+    median = float(statistics["median"])
+    difference = abs(value - median)
+    if difference == 0.0:
+        return 0.0
+    scale = float(statistics["scale"])
+    if scale == 0.0:
+        scale = 1e-12
+    return 0.6745 * difference / scale
+
+
+def score_measurement(
+    measurement: dict[str, Any],
+    baseline: dict[str, dict[str, float | int]],
+    previous: dict[str, Any] | None = None,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> dict[str, Any]:
+    """Score one measurement without changing the supplied baseline."""
+    feature_values = extract_features(measurement, previous)
+    feature_scores = {
+        feature: _robust_score(feature_values[feature], baseline[feature])
+        for feature in FEATURES
+        if feature in feature_values and feature in baseline
+    }
+    if not feature_scores:
+        return {
+            "overall_score": None,
+            "is_anomaly": False,
+            "strongest_feature": None,
+            "feature_scores": {},
+            "scorable": False,
+            "reason": "no feature has both a valid value and a baseline",
+        }
+    strongest_feature = max(feature_scores, key=feature_scores.get)
+    overall_score = feature_scores[strongest_feature]
+    return {
+        "overall_score": overall_score,
+        "is_anomaly": overall_score >= threshold,
+        "strongest_feature": strongest_feature,
+        "feature_scores": feature_scores,
+        "scorable": True,
+        "reason": None,
+    }
+
+
+def score_history(
+    measurements: list[dict[str, Any]],
+    baseline: dict[str, dict[str, float | int]] | None = None,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> list[dict[str, Any]]:
+    """Score chronologically ordered measurements against a fixed baseline."""
+    statistics = baseline if baseline is not None else build_baseline(measurements)
+    scored: list[dict[str, Any]] = []
+    previous = None
+    for measurement in measurements:
+        result = score_measurement(measurement, statistics, previous, threshold)
+        scored.append({"measurement": measurement, **result})
+        previous = measurement
+    return scored
 
 
 def main() -> None:
