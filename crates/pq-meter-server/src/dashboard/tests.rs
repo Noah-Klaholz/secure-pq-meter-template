@@ -613,7 +613,7 @@ async fn history_survives_long_downtime_without_replaying_live_state() {
 #[tokio::test]
 async fn forecast_endpoint_accepts_and_serves_predictions() {
     let source = source();
-    let app = router(source);
+    let app = router(source, Arc::new(Mutex::new(None)));
 
     // Initial state has no forecast.
     let response = app

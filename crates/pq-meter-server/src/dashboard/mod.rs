@@ -32,8 +32,14 @@ struct DashboardAppState {
     pending_config: Arc<Mutex<Option<ClientThresholdConfig>>>,
 }
 
-pub fn router(source: Arc<dyn SnapshotSource>, pending_config: Arc<Mutex<Option<ClientThresholdConfig>>>) -> Router {
-    let state = DashboardAppState { source, pending_config };
+pub fn router(
+    source: Arc<dyn SnapshotSource>,
+    pending_config: Arc<Mutex<Option<ClientThresholdConfig>>>,
+) -> Router {
+    let state = DashboardAppState {
+        source,
+        pending_config,
+    };
     Router::new()
         .route("/", get(|| async { asset("text/html; charset=utf-8", include_str!("assets/index.html")) }))
         .route("/assets/styles.css", get(|| async { asset("text/css; charset=utf-8", include_str!("assets/styles.css")) }))

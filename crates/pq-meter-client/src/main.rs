@@ -30,11 +30,9 @@ use clap::Parser;
 use scion_http3::{Client, Request};
 use sciparse::address::ip_socket_addr::ScionSocketIpAddr;
 
-
-
 use serde::Deserialize;
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 
 use tokio_modbus::Slave;
 use umg605_modbus_client::{DEFAULT_MODBUS_PORT, PHASE_COUNT, Phases, Snapshot};
@@ -319,7 +317,7 @@ const SETTLING_WINDOW: Duration = Duration::from_secs(2);
 /// The energy counters are deliberately left out: they only ever climb, so including them
 /// would make every single reading look like a state change.
 /// Threshold configuration received from the server, used to override the defaults.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct ClientThresholdConfig {
     #[serde(default)]
     voltage_step_v: Option<f32>,
@@ -352,8 +350,6 @@ struct ActiveThresholds {
     voltage_enabled: bool,
     current_a: f32,
     real_power_w: f32,
-    apparent_power_va: f32,
-    reactive_power_var: f32,
     cos_phi: f32,
     thd_voltage_pct: f32,
     thd_voltage_enabled: bool,
@@ -370,8 +366,6 @@ impl Default for ActiveThresholds {
             voltage_enabled: true,
             current_a: THRESHOLD_CURRENT_A,
             real_power_w: THRESHOLD_REAL_POWER_W,
-            apparent_power_va: THRESHOLD_APPARENT_POWER_VA,
-            reactive_power_var: THRESHOLD_REACTIVE_POWER_VAR,
             cos_phi: THRESHOLD_COS_PHI,
             thd_voltage_pct: THRESHOLD_THD_VOLTAGE_PCT,
             thd_voltage_enabled: true,
@@ -442,7 +436,8 @@ impl BaselineReading {
     }
 
     fn exceeds_threshold(&self, new: &BaselineReading, thresholds: &ActiveThresholds) -> bool {
-        (thresholds.frequency_enabled && exceeds(self.frequency, new.frequency, thresholds.frequency_hz))
+        (thresholds.frequency_enabled
+            && exceeds(self.frequency, new.frequency, thresholds.frequency_hz))
             || exceeds(
                 self.real_power_sum3,
                 new.real_power_sum3,
@@ -458,12 +453,23 @@ impl BaselineReading {
                 new.reactive_power_sum3,
                 THRESHOLD_REACTIVE_POWER_SUM_VAR,
             )
-            || (thresholds.voltage_enabled && exceeds_any_phase(self.voltage, new.voltage, thresholds.voltage_v))
+            || (thresholds.voltage_enabled
+                && exceeds_any_phase(self.voltage, new.voltage, thresholds.voltage_v))
             || exceeds_any_phase(self.current, new.current, thresholds.current_a)
             || exceeds_any_phase(self.real_power, new.real_power, thresholds.real_power_w)
             || exceeds_any_phase(self.cos_phi, new.cos_phi, thresholds.cos_phi)
-            || (thresholds.thd_voltage_enabled && exceeds_any_phase(self.thd_voltage, new.thd_voltage, thresholds.thd_voltage_pct))
-            || (thresholds.thd_current_enabled && exceeds_any_phase(self.thd_current, new.thd_current, thresholds.thd_current_pct))
+            || (thresholds.thd_voltage_enabled
+                && exceeds_any_phase(
+                    self.thd_voltage,
+                    new.thd_voltage,
+                    thresholds.thd_voltage_pct,
+                ))
+            || (thresholds.thd_current_enabled
+                && exceeds_any_phase(
+                    self.thd_current,
+                    new.thd_current,
+                    thresholds.thd_current_pct,
+                ))
     }
 }
 
@@ -611,7 +617,12 @@ impl SettledMonitor {
 
     /// Processes a new reading. Returns `true` if this reading should be recorded
     /// (and committed as the new baseline).
-    fn process_reading(&mut self, current: BaselineReading, now: Instant, thresholds: &ActiveThresholds) -> bool {
+    fn process_reading(
+        &mut self,
+        current: BaselineReading,
+        now: Instant,
+        thresholds: &ActiveThresholds,
+    ) -> bool {
         let Some(base) = self.baseline else {
             // First reading establishes the baseline immediately.
             self.baseline = Some(current);
@@ -738,7 +749,13 @@ async fn acquire(
 
         let current_reading = BaselineReading::from_snapshot(&snapshot);
         let changed = settled_monitor.process_reading(current_reading, start, &active_thresholds);
-        if should_record(changed, settled_monitor.is_settling(), heartbeat, last_recorded, start) {
+        if should_record(
+            changed,
+            settled_monitor.is_settling(),
+            heartbeat,
+            last_recorded,
+            start,
+        ) {
             last_recorded = Some(start);
 
             let depth = {
@@ -893,7 +910,7 @@ async fn upload(
 }
 
 /// What became of a batch the gateway tried to deliver.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum Delivery {
     /// The receiver has the readings. They can be removed from the queue. Optionally holds a new config.
     Accepted(Option<ClientThresholdConfig>),
@@ -1013,11 +1030,12 @@ async fn send_batch(
                     }
                 }
             }
-            let display: String = trimmed.lines()
+            let display: String = trimmed
+                .lines()
                 .filter(|line| !line.starts_with("__CONFIG_SYNC__:"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            
+
             if display.is_empty() {
                 String::new()
             } else {
@@ -1098,8 +1116,8 @@ mod tests {
     fn only_an_acknowledgement_allows_readings_to_be_forgotten() {
         use scion_http3::http::StatusCode;
 
-        assert_eq!(classify(StatusCode::OK), Delivery::Accepted);
-        assert_eq!(classify(StatusCode::NO_CONTENT), Delivery::Accepted);
+        assert_eq!(classify(StatusCode::OK), Delivery::Accepted(None));
+        assert_eq!(classify(StatusCode::NO_CONTENT), Delivery::Accepted(None));
 
         // A malformed batch is refused identically every time, so holding on to it would
         // block every reading behind it forever.
@@ -1203,6 +1221,7 @@ mod tests {
         let spool = Arc::new(Mutex::new(Spool::new(1000)));
         let queued = Arc::new(Notify::new());
         let reconnects = Arc::new(AtomicU64::new(0));
+        let (_config_tx, config_rx) = mpsc::channel(10);
 
         let task = tokio::spawn(acquire(
             MeterConnection::new(meter.address, Slave(1), Duration::from_millis(200)),
@@ -1211,6 +1230,7 @@ mod tests {
             Arc::clone(&spool),
             Arc::clone(&queued),
             Arc::clone(&reconnects),
+            config_rx,
         ));
 
         assert!(
@@ -1253,6 +1273,7 @@ mod tests {
         let capacity = 8;
         let spool = Arc::new(Mutex::new(Spool::new(capacity)));
         let queued = Arc::new(Notify::new());
+        let (_config_tx, config_rx) = mpsc::channel(10);
 
         let task = tokio::spawn(acquire(
             MeterConnection::new(meter.address, Slave(1), Duration::from_millis(200)),
@@ -1261,6 +1282,7 @@ mod tests {
             Arc::clone(&spool),
             queued,
             Arc::new(AtomicU64::new(0)),
+            config_rx,
         ));
 
         assert!(
@@ -1699,9 +1721,10 @@ mod tests {
     fn a_settled_change_is_always_recorded() {
         let now = Instant::now();
         // Even immediately after another reading, and even with no heartbeat configured.
-        assert!(should_record(true, None, Some(now), now));
+        assert!(should_record(true, false, None, Some(now), now));
         assert!(should_record(
             true,
+            false,
             Some(Duration::from_secs(2)),
             Some(now),
             now
@@ -1714,10 +1737,11 @@ mod tests {
         let heartbeat = Some(Duration::from_secs(2));
 
         // The very first reading has nothing to be quiet since.
-        assert!(should_record(false, heartbeat, None, t0));
+        assert!(should_record(false, false, heartbeat, None, t0));
 
         // Inside the interval the noise filter still holds the reading back.
         assert!(!should_record(
+            false,
             false,
             heartbeat,
             Some(t0),
@@ -1727,6 +1751,16 @@ mod tests {
         // At the interval it goes out, so the trend and the link stay alive.
         assert!(should_record(
             false,
+            false,
+            heartbeat,
+            Some(t0),
+            t0 + Duration::from_secs(2)
+        ));
+
+        // While settling, heartbeat does not trigger recording.
+        assert!(!should_record(
+            false,
+            true,
             heartbeat,
             Some(t0),
             t0 + Duration::from_secs(2)
@@ -1739,11 +1773,12 @@ mod tests {
         let t0 = Instant::now();
         assert!(!should_record(
             false,
+            false,
             None,
             Some(t0),
             t0 + Duration::from_secs(3600)
         ));
-        assert!(!should_record(false, None, None, t0));
+        assert!(!should_record(false, false, None, None, t0));
     }
 
     #[test]
@@ -1765,16 +1800,32 @@ mod tests {
         let spike = with_real_power(baseline, baseline.real_power[0] + 40.0);
 
         // Spike appears at t0 + 1s (new candidate)
-        assert!(!monitor.process_reading(spike, t0 + Duration::from_secs(1), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(
+            spike,
+            t0 + Duration::from_secs(1),
+            &ActiveThresholds::default()
+        ));
 
         // Still at spike level at t0 + 2s (1s of settling, < 2s window)
-        assert!(!monitor.process_reading(spike, t0 + Duration::from_secs(2), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(
+            spike,
+            t0 + Duration::from_secs(2),
+            &ActiveThresholds::default()
+        ));
 
         // Drops back to baseline at t0 + 2.5s (< 2s after spike started)
-        assert!(!monitor.process_reading(baseline, t0 + Duration::from_millis(2500), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(
+            baseline,
+            t0 + Duration::from_millis(2500),
+            &ActiveThresholds::default()
+        ));
 
         // Still at baseline at t0 + 5s: never triggered a state change
-        assert!(!monitor.process_reading(baseline, t0 + Duration::from_secs(5), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(
+            baseline,
+            t0 + Duration::from_secs(5),
+            &ActiveThresholds::default()
+        ));
     }
 
     #[test]
@@ -1787,16 +1838,32 @@ mod tests {
         let higher = with_real_power(baseline, baseline.real_power[0] + 40.0);
 
         // Jumps to higher power at t0 + 1s
-        assert!(!monitor.process_reading(higher, t0 + Duration::from_secs(1), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(
+            higher,
+            t0 + Duration::from_secs(1),
+            &ActiveThresholds::default()
+        ));
 
         // 1.5s after jump (t0 + 2.5s): still settling (< 2s)
-        assert!(!monitor.process_reading(higher, t0 + Duration::from_millis(2500), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(
+            higher,
+            t0 + Duration::from_millis(2500),
+            &ActiveThresholds::default()
+        ));
 
         // 2.0s after jump (t0 + 3.0s): settled! Returns true and commits new baseline
-        assert!(monitor.process_reading(higher, t0 + Duration::from_secs(3), &ActiveThresholds::default()));
+        assert!(monitor.process_reading(
+            higher,
+            t0 + Duration::from_secs(3),
+            &ActiveThresholds::default()
+        ));
 
         // Subsequent readings at the new baseline are ignored as steady state
-        assert!(!monitor.process_reading(higher, t0 + Duration::from_millis(3200), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(
+            higher,
+            t0 + Duration::from_millis(3200),
+            &ActiveThresholds::default()
+        ));
     }
 
     #[test]
@@ -1812,13 +1879,37 @@ mod tests {
         let r3 = with_real_power(baseline, 28.0);
         let r4 = with_real_power(baseline, 65.0);
 
-        assert!(!monitor.process_reading(r1, t0 + Duration::from_millis(200), &ActiveThresholds::default()));
-        assert!(!monitor.process_reading(r2, t0 + Duration::from_millis(500), &ActiveThresholds::default()));
-        assert!(!monitor.process_reading(r3, t0 + Duration::from_millis(800), &ActiveThresholds::default()));
-        assert!(!monitor.process_reading(r4, t0 + Duration::from_millis(1000), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(
+            r1,
+            t0 + Duration::from_millis(200),
+            &ActiveThresholds::default()
+        ));
+        assert!(!monitor.process_reading(
+            r2,
+            t0 + Duration::from_millis(500),
+            &ActiveThresholds::default()
+        ));
+        assert!(!monitor.process_reading(
+            r3,
+            t0 + Duration::from_millis(800),
+            &ActiveThresholds::default()
+        ));
+        assert!(!monitor.process_reading(
+            r4,
+            t0 + Duration::from_millis(1000),
+            &ActiveThresholds::default()
+        ));
 
         // Stable at 65W until 2 seconds have passed since t0 + 1000ms (i.e. t0 + 3000ms)
-        assert!(!monitor.process_reading(r4, t0 + Duration::from_millis(2500), &ActiveThresholds::default()));
-        assert!(monitor.process_reading(r4, t0 + Duration::from_millis(3000), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(
+            r4,
+            t0 + Duration::from_millis(2500),
+            &ActiveThresholds::default()
+        ));
+        assert!(monitor.process_reading(
+            r4,
+            t0 + Duration::from_millis(3000),
+            &ActiveThresholds::default()
+        ));
     }
 }

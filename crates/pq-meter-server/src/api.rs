@@ -156,11 +156,11 @@ fn apply_batch(
 
     // If there is a pending threshold configuration, append it as a JSON line that the
     // client recognises and applies. The next batch will not carry it again.
-    if let Ok(mut pending) = state.pending_config.lock() {
-        if let Some(config) = pending.take() {
-            let config_json = serde_json::to_string(&config).unwrap_or_default();
-            response.push_str(&format!("\n__CONFIG_SYNC__:{config_json}"));
-        }
+    if let Ok(mut pending) = state.pending_config.lock()
+        && let Some(config) = pending.take()
+    {
+        let config_json = serde_json::to_string(&config).unwrap_or_default();
+        response.push_str(&format!("\n__CONFIG_SYNC__:{config_json}"));
     }
 
     (StatusCode::OK, response)
