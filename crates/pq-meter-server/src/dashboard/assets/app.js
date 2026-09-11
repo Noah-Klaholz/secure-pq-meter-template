@@ -4,11 +4,12 @@ import { createOverview } from './overview.js';
 const themeToggle = document.getElementById('theme-toggle');
 const themeStorageKey = 'pq-monitor-theme';
 const themeModes = new Set(['auto', 'light', 'dark']);
+const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
 let selectedTheme = 'auto';
 
 function resolveTheme(mode) {
   return mode === 'auto'
-    ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    ? (systemTheme.matches ? 'dark' : 'light')
     : mode;
 }
 
@@ -35,6 +36,9 @@ function initialTheme() {
 }
 
 applyTheme(initialTheme());
+systemTheme.addEventListener('change', () => {
+  if (selectedTheme === 'auto') applyTheme('auto');
+});
 themeToggle.addEventListener('click', () => {
   const mode = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
   applyTheme(mode);
