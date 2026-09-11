@@ -92,7 +92,9 @@ export function createOverview() {
   }
 
   function renderRecentMeasurements(series) {
-    const samples = (series.samples ?? []).slice(-10);
+    const samples = [...(series.samples ?? [])]
+      .sort((left, right) => Date.parse(right.at) - Date.parse(left.at))
+      .slice(0, 10);
     const body = byId('recent-measurements');
     if (!samples.length) {
       const row = document.createElement('tr');
