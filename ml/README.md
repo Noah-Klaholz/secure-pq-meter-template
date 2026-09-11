@@ -84,6 +84,31 @@ python ml/anomaly.py \
    --limit 10
 ```
 
+### Dashboard connection
+
+The terminal report alone does not update the Supply status card. With the Rust
+server running, start a separate publisher from the repository root:
+
+```bash
+python3 ml/anomaly.py --db data/history.db \
+  --jsonl data/measurement-history-colleague.jsonl \
+  --server http://127.0.0.1:8080 --interval 2
+```
+
+Use the server's actual `--history-file` path for `--db` and the desired baseline
+history for `--jsonl`. Omit `--interval` to publish once; use `--json` without
+`--server` to print the current result without publishing it.
+
+The publisher maps the latest measurement's `overall_score` to `score` and sends
+`is_anomaly`, `score`, `strongest_feature`, and the measurement `timestamp` to
+`POST /api/v1/anomaly`. `GET /api/v1/anomaly` returns that result, and the existing
+`GET /api/v1/state` poll includes it as `power_quality.anomaly` for the card.
+No readings or an unscorable latest reading produces JSON `null`, clearing the
+stored result so the card stays Waiting rather than reporting a false NORMAL.
+State is in memory: before the first publish or after a clear, the anomaly GET
+returns 204. Keep the publisher running for updates and to repopulate state after
+a server restart; the timestamp identifies the measurement, not the publish time.
+
 ### Example result
 
 Example output from the current hackathon dataset (not a universal benchmark):

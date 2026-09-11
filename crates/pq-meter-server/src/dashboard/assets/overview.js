@@ -3,6 +3,12 @@ import { drawChart } from './charts.js';
 const number = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 const time = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const integer = new Intl.NumberFormat();
+const anomalyFeatureLabels = {
+  frequency_hz: 'Frequency',
+  'l1.voltage_v': 'Voltage L1',
+  'l1.thd_current_pct': 'THD current',
+  'l1.thd_voltage_pct': 'THD voltage',
+};
 
 const byId = (id) => document.getElementById(id);
 const text = (id, value) => { byId(id).textContent = value; };
@@ -17,6 +23,10 @@ const show = (value, digits = 1) =>
 function badge(element, label, tone) {
   element.textContent = label;
   element.className = `badge ${tone}`;
+}
+
+function anomalyFeatureLabel(feature) {
+  return anomalyFeatureLabels[feature] ?? feature ?? '—';
 }
 
 /** Indexes the receiver's violations so a cell can ask whether it is one. */
@@ -201,6 +211,8 @@ export function createOverview({ onRename } = {}) {
       const violations = pq.violations ?? [];
       const index = violationIndex(violations);
       const hasReading = pq.total_power_watts != null;
+      const anomaly = pq.anomaly;
+      const hasAnomaly = anomaly && typeof anomaly === 'object' && typeof anomaly.is_anomaly === 'boolean';
 
       // Frequency, with the band it is judged against.
       const frequencyViolation = index.get('-:frequency_hz');
@@ -223,11 +235,11 @@ export function createOverview({ onRename } = {}) {
       // Supply status summarises the events below.
       const breaches = violations.filter(v => v.severity === 'violation').length;
       const warnings = violations.length - breaches;
-      text('supply-status', !hasReading ? '—' : breaches ? `${breaches} violation${breaches === 1 ? '' : 's'}` : warnings ? `${warnings} warning${warnings === 1 ? '' : 's'}` : 'Within limits');
-      byId('supply-status').className = breaches ? 'breach-text' : warnings ? 'watch-text' : '';
-      text('supply-note', limits
-        ? `Voltage ${show(limits.voltage_min_v, 0)}–${show(limits.voltage_max_v, 0)} V · THDᵤ max ${show(limits.thd_voltage_max_pct, 0)} %`
-        : 'Checked against EN 50160 limits');
+      text('supply-status', !hasAnomaly ? 'Waiting' : anomaly.is_anomaly ? 'ANOMALY' : 'NORMAL');
+      byId('supply-status').className = !hasAnomaly ? '' : anomaly.is_anomaly ? 'breach-text' : 'positive-text';
+      text('supply-note', hasAnomaly
+        ? `Anomaly score: ${show(anomaly.score, 2)} · Strongest feature: ${anomalyFeatureLabel(anomaly.strongest_feature)}`
+        : 'Anomaly score: — · Strongest feature: —');
 
       // Phases.
       const phaseRows = (pq.phases ?? []).map(phase => {
@@ -276,10 +288,23 @@ export function createOverview({ onRename } = {}) {
         item.append(label, message);
         return item;
       });
+      const anomalyEvents = Array.isArray(pq.anomaly_events) ? pq.anomaly_events : [];
+      for (const anomalyEvent of anomalyEvents) {
+        const item = document.createElement('li');
+        item.className = anomalyEvent.is_anomaly ? 'breach' : 'watch';
+        const label = document.createElement('span');
+        label.className = 'event-tag';
+        label.textContent = 'ANOMALY';
+        const message = document.createElement('span');
+        const at = anomalyEvent.timestamp ? time.format(new Date(anomalyEvent.timestamp)) : '—';
+        message.textContent = `${at} ${anomalyFeatureLabel(anomalyEvent.strongest_feature)} anomaly · score ${show(anomalyEvent.score, 2)}`;
+        item.append(label, message);
+        events.push(item);
+      }
       if (!events.length) {
         const item = document.createElement('li');
         item.className = 'empty';
-        item.textContent = hasReading ? 'All measured quantities are within their limits.' : 'Waiting for the receiver…';
+        item.textContent = hasAnomaly ? 'No power-quality anomalies detected.' : 'No power-quality anomalies detected.';
         events.push(item);
       }
       byId('violations').replaceChildren(...events);

@@ -752,6 +752,10 @@ td.watch {
   color:var(--warning);
 }
 
+.positive-text {
+  color:var(--green);
+}
+
 .idle-phase td {
   color:var(--muted);
 }
