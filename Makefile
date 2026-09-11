@@ -32,7 +32,13 @@ endif
 SERVER ?= $(WLAN_IP)
 
 PI_USER ?= anapaya
-PI_HOST ?= 10.175.8.48
+# The DNS name, not the address: fhnw-public hands out a 20 minute lease from a pool that
+# spans several /24s, so the Pi comes back on a different address - often in a different
+# subnet - after any gap longer than the lease. FHNW's DHCP registers each client's hostname,
+# so this name follows the Pi wherever it lands (TTL 600s). `<hostname>.local` does not work
+# here: mDNS is link-local and the Pi and the laptop sit on different routed subnets.
+# Override with `make PI_HOST=<address>` to pin an address for a one-off.
+PI_HOST ?= edh-anapaya.edu.ds.fhnw.ch
 PI_DEST ?= /home/anapaya
 
 # This is not a good idea but I don't wanna do it with ssh key right now XD
