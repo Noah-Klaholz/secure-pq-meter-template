@@ -18,6 +18,7 @@ function applyTheme(mode) {
   selectedTheme = themeModes.has(mode) ? mode : 'auto';
   const resolvedTheme = resolveTheme(selectedTheme);
   const dark = resolvedTheme === 'dark';
+  document.documentElement.dataset.themeMode = selectedTheme;
   document.documentElement.dataset.theme = resolvedTheme;
   themeToggle.setAttribute('aria-pressed', String(dark));
   const label = `${selectedTheme[0].toUpperCase()}${selectedTheme.slice(1)} mode`;
