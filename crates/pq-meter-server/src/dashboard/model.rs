@@ -11,12 +11,17 @@ use serde::Serialize;
 use crate::{
     decision::DeviceChange,
     input::{MeterReading, PhaseReading},
+    labels::RenameError,
     meter::{HISTORY_WINDOW, SharedMeterState},
     quality::{self, Limits, Violation},
     transport::GatewayTransport,
 };
 
 pub trait SnapshotSource: Send + Sync {
+    fn rename_device(&self, _id: &str, _name: &str) -> Result<String, RenameError> {
+        Err(RenameError::Unavailable)
+    }
+
     fn snapshot(&self) -> Result<Snapshot, &'static str>;
 
     /// The recent series behind the dashboard charts.
@@ -122,7 +127,7 @@ pub struct HistorySample {
 #[derive(Serialize)]
 pub struct DeviceStatus {
     pub id: &'static str,
-    pub name: &'static str,
+    pub name: String,
     pub nominal_power_watts: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reactive_power_var: Option<f32>,
@@ -137,7 +142,7 @@ pub struct DeviceStatus {
 pub struct Change {
     pub kind: &'static str,
     pub device_id: &'static str,
-    pub device_name: &'static str,
+    pub device_name: String,
     pub nominal_power_watts: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reactive_power_var: Option<f32>,
@@ -210,6 +215,13 @@ fn power_quality(reading: Option<MeterReading>) -> PowerQuality {
 }
 
 impl SnapshotSource for LiveMeterSource {
+    fn rename_device(&self, id: &str, name: &str) -> Result<String, RenameError> {
+        self.meter
+            .lock()
+            .map_err(|_| RenameError::Unavailable)?
+            .rename_device(id, name)
+    }
+
     fn snapshot(&self) -> Result<Snapshot, &'static str> {
         let meter = self
             .meter
@@ -239,7 +251,11 @@ impl SnapshotSource for LiveMeterSource {
                 .iter()
                 .map(|device| DeviceStatus {
                     id: device.id,
-                    name: device.name,
+                    name: meter
+                        .device_names
+                        .get(device.id)
+                        .cloned()
+                        .unwrap_or_else(|| device.name.to_owned()),
                     nominal_power_watts: device.power_watts,
                     reactive_power_var: device.reactive_power_var,
                     thd_current_pct: device.thd_current_pct,
@@ -259,7 +275,11 @@ impl SnapshotSource for LiveMeterSource {
                 Some(Change {
                     kind,
                     device_id: device.id,
-                    device_name: device.name,
+                    device_name: meter
+                        .device_names
+                        .get(device.id)
+                        .cloned()
+                        .unwrap_or_else(|| device.name.to_owned()),
                     nominal_power_watts: device.power_watts,
                     reactive_power_var: device.reactive_power_var,
                     thd_current_pct: device.thd_current_pct,

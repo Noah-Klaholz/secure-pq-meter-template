@@ -1,6 +1,7 @@
 //! Device catalog and interchangeable power-change decision methods.
 
 use crate::input::MeterReading;
+use serde::{Deserialize, Serialize};
 
 /// Dummy device table with multi-feature electrical profiles (Active Power, Reactive Power, THD).
 pub const DUMMY_DEVICE_CATALOG: &[Device] = &[
@@ -127,6 +128,11 @@ pub trait DecisionMethod: Send + Sync {
     /// learned background load plus every appliance it has fingerprinted so far, with
     /// up-to-date signatures, so the dashboard reflects them as soon as they are seen.
     fn learned_devices(&self) -> Vec<Device> {
+        Vec::new()
+    }
+
+    /// Full signatures to retain alongside user labels, including distortion current.
+    fn learned_profiles(&self) -> Vec<StoredAppliance> {
         Vec::new()
     }
 }
@@ -493,7 +499,7 @@ pub fn contains_device(devices: &[Device], id: &str) -> bool {
 /// across parallel loads. That additivity is what lets [`AdaptiveNilm`] subtract a
 /// running reference from each settled reading and treat the remainder as one
 /// appliance's contribution.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 struct Signature {
     /// Real power, W.
     p: f32,
@@ -570,6 +576,14 @@ struct SettlingLevel {
     samples: usize,
 }
 
+/// Owned persistence format; runtime identifiers are allocated only once at startup.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredAppliance {
+    id: String,
+    name: String,
+    edge: Signature,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LearnedAppliance {
     id: &'static str,
@@ -632,6 +646,43 @@ impl AdaptiveNilm {
                 idist: 0.25,
             },
         }
+    }
+
+    /// Restore identities and complete signatures, but relearn the session background.
+    pub fn restore(profiles: Vec<StoredAppliance>) -> anyhow::Result<Self> {
+        let mut method = Self::new();
+        anyhow::ensure!(
+            profiles.len() <= method.max_appliances,
+            "too many saved devices"
+        );
+        let mut ids = std::collections::HashSet::new();
+        for profile in &profiles {
+            let index = profile
+                .id
+                .strip_prefix("learned-")
+                .and_then(|id| id.parse::<usize>().ok());
+            anyhow::ensure!(
+                index.is_some_and(|id| id > 0 && id < usize::MAX),
+                "invalid saved device ID"
+            );
+            anyhow::ensure!(ids.insert(&profile.id), "duplicate saved device ID");
+            anyhow::ensure!(
+                profile.name.len() <= 256
+                    && profile.edge.p.is_finite()
+                    && profile.edge.q.is_finite()
+                    && profile.edge.idist.is_finite(),
+                "invalid saved signature"
+            );
+            method.minted = method.minted.max(index.unwrap());
+        }
+        for profile in profiles {
+            method.appliances.push(LearnedAppliance {
+                id: Box::leak(profile.id.into_boxed_str()),
+                name: Box::leak(profile.name.into_boxed_str()),
+                edge: profile.edge,
+            });
+        }
+        Ok(method)
     }
 
     /// Tuning hook for tests and future CLI flags.
@@ -794,6 +845,17 @@ impl DecisionMethod for AdaptiveNilm {
         } else {
             self.match_turn_off(edge, active_devices)
         }
+    }
+
+    fn learned_profiles(&self) -> Vec<StoredAppliance> {
+        self.appliances
+            .iter()
+            .map(|appliance| StoredAppliance {
+                id: appliance.id.to_owned(),
+                name: appliance.name.to_owned(),
+                edge: appliance.edge,
+            })
+            .collect()
     }
 
     fn learned_devices(&self) -> Vec<Device> {

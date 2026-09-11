@@ -41,7 +41,7 @@ function cell(row, value, digits, unit, violation) {
   row.append(td);
 }
 
-export function createOverview() {
+export function createOverview({ onRename } = {}) {
   let deviceSignature = '';
   let history = { samples: [], window_seconds: 60 };
 
@@ -258,7 +258,7 @@ export function createOverview() {
 
       renderCharts(limits);
 
-      // Devices, secondary.
+      // Connected devices.
       const active = snapshot.devices.filter(device => device.active).length;
       text('active-count', hasReading ? integer.format(active) : '—');
       text('catalog-count', ` / ${snapshot.devices.length}`);
@@ -273,6 +273,7 @@ export function createOverview() {
           const row = document.createElement('tr');
           const name = document.createElement('td');
           name.textContent = device.name;
+          name.className = 'device-name';
           const id = document.createElement('span');
           id.className = 'device-id';
           id.textContent = device.id;
@@ -292,13 +293,21 @@ export function createOverview() {
           const state = document.createElement('span');
           badge(state, !hasReading ? 'Awaiting data' : device.active ? 'Active' : 'Not detected', device.active ? 'positive' : 'neutral');
           status.append(state);
-          row.append(name, profile, status);
+          const actions = document.createElement('td');
+          const rename = document.createElement('button');
+          rename.type = 'button';
+          rename.textContent = 'Rename';
+          rename.dataset.deviceId = device.id;
+          rename.setAttribute('aria-label', `Rename ${device.name}`);
+          rename.addEventListener('click', () => onRename?.(device));
+          actions.append(rename);
+          row.append(name, profile, status, actions);
           return row;
         });
         if (!rows.length) {
           const row = document.createElement('tr');
           const cell = document.createElement('td');
-          cell.colSpan = 3;
+          cell.colSpan = 4;
           cell.className = 'empty';
           cell.textContent = 'No devices in the catalog.';
           row.append(cell);

@@ -296,7 +296,23 @@ process to start. Recompile the server after editing an asset. The charts are in
 drawn by `assets/charts.js`: the content security policy allows scripts from this origin
 only, so there is no charting library to load.
 
-The overview refreshes once per second and shows:
+The dashboard has three views, reachable through the sidebar (a horizontal navigation
+on small screens): **Power Quality** for live measurements, quality events and transport;
+**Connected Devices** for the device catalog, labels and latest device change; and
+**History** for the rolling charts and recent measurements. The selected view is retained
+in the URL, and all views refresh automatically.
+
+In **Connected Devices**, select **Rename**, enter a name (1–80 characters), then select
+**Save name**. Names are stored on the receiver in `device-labels.json`, so every browser
+sees the same names. Use `--device-labels-file /path/to/devices.json` to choose a persistent
+location; relative paths resolve from the server's working directory. Each successful save
+atomically retains the labels and all currently learned appliance signatures, including
+their IDs and distortion current. Restarting restores those identities and relearns the
+idle background from the first reading. As before, appliances already on at startup are
+part of that background until they can be inferred from later changes. Unsaved discoveries
+and measurement history remain session data. Save errors leave the previous label intact.
+
+The live state refreshes once per second. Across the three views, the dashboard shows:
 
 - **Grid frequency**, against the EN 50160 band it is judged in.
 - **Net real power**, signed, with an import/export badge. This is the meter's own
@@ -414,8 +430,9 @@ the latest actual device change alongside the existing power and device state.
 
 `dashboard/model.rs` defines the dashboard's serializable read model and `SnapshotSource`
 interface. `LiveMeterSource` takes a consistent copy of meter state under a short lock,
-then builds the response after releasing it. The dashboard never calls the decision engine
-or mutates the meter. Alternative sources can implement the same interface.
+then builds the response after releasing it. The dashboard never calls the decision engine. Its rename operation updates only user
+labels and persists them with the learned signatures. Alternative sources can implement
+the same interface; sources without rename support return HTTP 503.
 
 `quality.rs` holds the limits and decides which measurements breach them. `transport.rs`
 parses what the gateway reports about the link. Neither knows about HTTP or the dashboard.
@@ -425,13 +442,15 @@ parses what the gateway reports about the link. Neither knows about HTTP or the 
 `schema_version`, server timestamps, the stale threshold, the power-quality block and the
 limits it was judged against, the transport, reading count, device states, the last change,
 and the latest full measurement. Responses disable caching. No reading is represented as
-JSON `null`, not zero. An unavailable store returns a JSON error with HTTP 503; mutation
-requests are not supported.
+JSON `null`, not zero. An unavailable store returns a JSON error with HTTP 503.
+`PUT /api/v1/devices/{id}/label` accepts a JSON object with a `name` string and returns the
+saved, trimmed name. Invalid names return HTTP 400 and unknown IDs return HTTP 404.
+The live state and history endpoints remain read-only.
 
 The frontend separates HTTP requests (`assets/api.js`), polling and lifecycle
 (`assets/app.js`), rendering (`assets/overview.js`), and chart geometry
-(`assets/charts.js`). Add future views alongside the overview, with their own API functions
-and navigation entries.
+(`assets/charts.js`). Hash navigation in `app.js` switches the three view sections, and
+the rename dialog stays independent of the polling-rendered device rows.
 
 History is **in memory and bounded**: the last 60 seconds of accepted readings, capped by
 `History::bounded`, reset by a restart. Device changes are still only kept as the single

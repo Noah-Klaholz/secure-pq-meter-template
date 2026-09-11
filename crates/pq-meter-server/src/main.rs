@@ -4,7 +4,7 @@
 //!
 //! 1. It starts a simulated SCION network (PocketSCION) with two ASes, see [`network`].
 //! 2. It runs an HTTP/3 server inside one of those ASes, see [`api`].
-//! 3. It serves a local, read-only web dashboard, see [`dashboard`].
+//! 3. It serves a local web dashboard, see [`dashboard`].
 //!
 //! Run it on the laptop; run `pq-meter-client` on the gateway.
 
@@ -13,6 +13,7 @@ mod dashboard;
 mod decision;
 pub mod history;
 mod input;
+mod labels;
 mod meter;
 mod network;
 mod quality;
@@ -57,6 +58,10 @@ struct Args {
     /// Local dashboard port (0 selects a free port). Always binds to 127.0.0.1.
     #[arg(long, default_value_t = 8080)]
     dashboard_port: u16,
+
+    /// File retaining user labels and learned signatures across receiver restarts.
+    #[arg(long, default_value = "device-labels.json")]
+    device_labels_file: std::path::PathBuf,
 
     /// Run the receiver without the local web dashboard.
     #[arg(long)]
@@ -126,17 +131,11 @@ async fn main() -> anyhow::Result<()> {
         .context("opening a SCION socket for the server")?;
     let server_address = socket.local_addr();
 
-    // The table, decision method, and input decoder are supplied independently so each can
-    // be replaced without changing the HTTP server.
-    // The adaptive method learns every device at runtime, so it starts from an empty
-    // catalog; the static methods keep the predefined table.
-    let seed_catalog = match args.decision_method {
-        DecisionMethodArg::Adaptive => Vec::new(),
-        _ => decision::DUMMY_DEVICE_CATALOG.to_vec(),
-    };
-    let meter = Arc::new(Mutex::new(meter::MeterState::new(seed_catalog)));
+    let labels = labels::DeviceLabels::load(args.device_labels_file.clone())?;
     let decision_method: Box<dyn decision::DecisionMethod> = match args.decision_method {
-        DecisionMethodArg::Adaptive => Box::new(decision::AdaptiveNilm::new()),
+        DecisionMethodArg::Adaptive => {
+            Box::new(decision::AdaptiveNilm::restore(labels.appliances.clone())?)
+        }
         DecisionMethodArg::Settled => Box::new(decision::SettledPowerMatch::new(
             5.0, // Minimum change that can trigger a device-state update.
             3.0, // Consecutive readings must remain within +/- 3 W.
@@ -148,6 +147,14 @@ async fn main() -> anyhow::Result<()> {
             decision::SettledPowerMatch::with_pq_tolerances(5.0, 3.0, 1, 8.0, 15.0, 30.0),
         ),
     };
+    let seed_catalog = match args.decision_method {
+        DecisionMethodArg::Adaptive => decision_method.learned_devices(),
+        _ => decision::DUMMY_DEVICE_CATALOG.to_vec(),
+    };
+    let meter = Arc::new(Mutex::new(meter::MeterState::with_labels(
+        seed_catalog,
+        labels,
+    )));
     let decision_method: api::SharedDecisionMethod = Arc::new(Mutex::new(decision_method));
     let reading_decoder: input::SharedReadingDecoder = Arc::new(input::JsonReadingDecoder);
 

@@ -10,7 +10,7 @@
   <script type="module" src="/assets/app.js"></script>
 </head>
 <body>
-  <a class="skip-link" href="#main">Skip to overview</a>
+  <a class="skip-link" href="#main">Skip to dashboard</a>
   <header class="topbar">
     <a class="brand" href="/" aria-label="PQ Monitor home"><span class="brand-icon" aria-hidden="true">▥</span> PQ Monitor</a>
     <span class="environment">LOCAL WORKSPACE</span>
@@ -18,18 +18,22 @@
   <div class="layout">
     <aside class="sidebar">
       <p class="nav-label">MONITORING</p>
-      <nav aria-label="Dashboard views"><a class="nav-item selected" href="#overview" aria-current="page"><span aria-hidden="true">▦</span> Power quality</a></nav>
+      <nav aria-label="Dashboard views">
+        <a class="nav-item selected" href="#power-quality" aria-current="page">Power Quality</a>
+        <a class="nav-item" href="#connected-devices">Connected Devices</a>
+        <a class="nav-item" href="#history">History</a>
+      </nav>
       <div class="sidebar-note"><span class="tiny-dot"></span> SCION meter receiver<p>Current session<br>Last 60 s in memory</p></div>
     </aside>
-    <main id="main">
-      <section id="overview" aria-labelledby="page-title">
+    <main id="main" tabindex="-1">
         <div class="page-heading">
-          <div><p class="eyebrow">POWER QUALITY / LIVE STATE</p><h1 id="page-title">Power quality overview</h1><p class="subtitle">Three-phase measurements from the meter, carried over SCION.</p></div>
+          <div><p id="page-eyebrow" class="eyebrow">POWER QUALITY / LIVE STATE</p><h1 id="page-title" tabindex="-1">Power quality overview</h1><p id="page-subtitle" class="subtitle">Three-phase measurements from the meter, carried over SCION.</p></div>
           <div class="refresh-area"><span id="connection" class="badge neutral" role="status">Connecting</span><button id="refresh" type="button">↻ <span>Refresh</span></button></div>
         </div>
         <div id="notice" class="notice" role="status">Connecting to the local receiver…</div>
         <noscript><p class="notice">Enable JavaScript to display live readings.</p></noscript>
 
+      <section id="power-quality" class="dashboard-view" aria-label="Power Quality">
         <div class="metrics">
           <article class="metric primary">
             <p class="metric-label">Grid frequency</p>
@@ -77,6 +81,49 @@
           <p class="panel-footnote">A phase with nothing wired to it reads 0 V and is not judged against the voltage band. <span class="dash-key">n/a</span> is a quantity the meter reported as unavailable — the distortion of a current that is not flowing has nothing to be measured against.</p>
         </article>
 
+        <div class="detail-grid">
+          <div class="view-stack">
+          <article class="panel">
+            <div class="panel-heading"><div><h2>Power quality events</h2><p>Measurements outside their limit</p></div><span id="violation-count" class="badge positive">—</span></div>
+            <ul id="violations" class="event-list"><li class="empty">Waiting for the receiver…</li></ul>
+            <p class="panel-footnote">Voltage and frequency limits follow EN 50160. Current distortion is reported as a warning above <span id="thd-current-note">1 A</span>, since the ratio is not meaningful at idle.</p>
+          </article>
+
+          </div>
+          <div class="view-stack">
+            <article class="panel">
+              <div class="panel-heading"><h2>SCION transport</h2></div>
+              <dl class="details">
+                <div><dt>Link state</dt><dd id="transport-state">—</dd></div>
+                <div><dt>Path in use</dt><dd id="scion-path" class="path-value">—</dd></div>
+                <div><dt>Last acknowledgement</dt><dd id="ack-latency">—</dd></div>
+                <div><dt>Queued readings</dt><dd id="queued-readings">—</dd></div>
+                <div><dt>Path failovers</dt><dd id="failover-count">—</dd></div>
+                <div><dt>Readings received</dt><dd id="readings-count">—</dd></div>
+                <div><dt>Last reading</dt><dd id="last-reading">—</dd></div>
+              </dl>
+              <p class="panel-footnote" id="transport-footnote">Path, queue and failover count are reported by the gateway; the link state is judged here from arrival times.</p>
+            </article>
+
+          </div>
+        </div>
+
+      </section>
+      <section id="connected-devices" class="dashboard-view" aria-label="Connected Devices" hidden>
+        <p id="device-save-status" class="save-status" role="status"></p>
+        <div class="view-stack">
+          <article class="panel devices-panel">
+            <div class="panel-heading"><div><h2>Device activity</h2><p>Rename recognized devices and track their inferred state</p></div><span id="device-summary" class="small-label">—</span></div>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Device</th><th scope="col">Signature (ΔP, ΔQ)</th><th scope="col">Inferred state</th><th scope="col">Label</th></tr></thead><tbody id="devices"><tr><td colspan="4" class="empty">Waiting for the receiver…</td></tr></tbody></table></div>
+            <p class="panel-footnote">Device states are estimates. The first accepted reading becomes the always-on background; each later settled step in real/reactive power is matched to a known device or added as a new one. Devices already switching before the first reading are folded into the background.</p>
+          </article>
+        <div class="device-details-grid">
+            <article class="panel"><div class="panel-heading"><h2>Latest device change</h2></div><div class="panel-body"><span id="change-kind" class="badge neutral">No change yet</span><h3 id="change-device">Waiting for a match</h3><p id="change-detail" class="muted">Detected additions and removals will appear here.</p><p id="change-time" class="timestamp">—</p></div></article>
+            <article class="panel"><div class="panel-heading"><h2>Receiver details</h2></div><dl class="details"><div><dt>Decision method</dt><dd id="method">—</dd></div><div><dt>Inferred devices</dt><dd><span id="active-count">—</span><span id="catalog-count"></span></dd></div><div><dt>Inferred nominal power</dt><dd><span id="inferred-power">—</span> W</dd></div><div><dt>Dashboard refresh</dt><dd>Every second</dd></div></dl></article>
+        </div>
+        </div>
+      </section>
+      <section id="history" class="dashboard-view" aria-label="History" hidden>
         <div class="chart-grid">
           <article class="panel chart-panel">
             <div class="panel-heading"><div><h2>Frequency</h2><p>Last 60 s · band 49.5–50.5 Hz</p></div><span id="chart-frequency-now" class="small-label">—</span></div>
@@ -91,38 +138,6 @@
             <div class="panel-heading"><div><h2>Real power</h2><p>Last 60 s · negative is export</p></div><span id="chart-power-now" class="small-label">—</span></div>
             <div class="chart-body"><svg id="chart-power" class="chart" role="img" aria-label="Three-phase real power over the last 60 seconds"></svg><div class="chart-scale"><span id="chart-power-max">—</span><span id="chart-power-min">—</span></div></div>
           </article>
-        </div>
-
-        <div class="detail-grid">
-          <div class="side-panels">
-          <article class="panel">
-            <div class="panel-heading"><div><h2>Power quality events</h2><p>Measurements outside their limit</p></div><span id="violation-count" class="badge positive">—</span></div>
-            <ul id="violations" class="event-list"><li class="empty">Waiting for the receiver…</li></ul>
-            <p class="panel-footnote">Voltage and frequency limits follow EN 50160. Current distortion is reported as a warning above <span id="thd-current-note">1 A</span>, since the ratio is not meaningful at idle.</p>
-          </article>
-          <article class="panel devices-panel">
-            <div class="panel-heading"><div><h2>Device activity</h2><p>Secondary: signatures learned at runtime from P/Q step changes</p></div><span id="device-summary" class="small-label">—</span></div>
-            <div class="table-wrap"><table><thead><tr><th scope="col">Device</th><th scope="col">Signature (ΔP, ΔQ)</th><th scope="col">Inferred state</th></tr></thead><tbody id="devices"><tr><td colspan="3" class="empty">Waiting for the receiver…</td></tr></tbody></table></div>
-            <p class="panel-footnote">Device states are estimates. The first accepted reading becomes the always-on background; each later settled step in real/reactive power is matched to a known device or added as a new one. Devices already switching before the first reading are folded into the background.</p>
-          </article>
-          </div>
-          <div class="side-panels">
-            <article class="panel">
-              <div class="panel-heading"><h2>SCION transport</h2></div>
-              <dl class="details">
-                <div><dt>Link state</dt><dd id="transport-state">—</dd></div>
-                <div><dt>Path in use</dt><dd id="scion-path" class="path-value">—</dd></div>
-                <div><dt>Last acknowledgement</dt><dd id="ack-latency">—</dd></div>
-                <div><dt>Queued readings</dt><dd id="queued-readings">—</dd></div>
-                <div><dt>Path failovers</dt><dd id="failover-count">—</dd></div>
-                <div><dt>Readings received</dt><dd id="readings-count">—</dd></div>
-                <div><dt>Last reading</dt><dd id="last-reading">—</dd></div>
-              </dl>
-              <p class="panel-footnote" id="transport-footnote">Path, queue and failover count are reported by the gateway; the link state is judged here from arrival times.</p>
-            </article>
-            <article class="panel"><div class="panel-heading"><h2>Latest device change</h2></div><div class="panel-body"><span id="change-kind" class="badge neutral">No change yet</span><h3 id="change-device">Waiting for a match</h3><p id="change-detail" class="muted">Detected additions and removals will appear here.</p><p id="change-time" class="timestamp">—</p></div></article>
-            <article class="panel"><div class="panel-heading"><h2>Receiver details</h2></div><dl class="details"><div><dt>Decision method</dt><dd id="method">—</dd></div><div><dt>Inferred devices</dt><dd><span id="active-count">—</span><span id="catalog-count"></span></dd></div><div><dt>Inferred nominal power</dt><dd><span id="inferred-power">—</span> W</dd></div><div><dt>Dashboard refresh</dt><dd>Every second</dd></div></dl></article>
-          </div>
         </div>
 
         <article class="panel recent-measurements-panel">
@@ -150,9 +165,20 @@
           </div>
         </article>
 
-        <footer class="page-footer"><span>Voltages phase-to-neutral · Power signed, negative is export · Device power is nominal, not individually measured.</span><span id="last-sync">Not yet synchronized</span></footer>
       </section>
+        <footer class="page-footer"><span>Voltages phase-to-neutral · Power signed, negative is export · Device power is nominal, not individually measured.</span><span id="last-sync">Not yet synchronized</span></footer>
     </main>
   </div>
+  <dialog id="rename-dialog" aria-labelledby="rename-title">
+    <form id="rename-form">
+      <h2 id="rename-title">Rename device</h2>
+      <p id="rename-device-id" class="muted"></p>
+      <label for="device-name">Device name</label>
+      <input id="device-name" name="name" type="text" maxlength="80" required autocomplete="off" aria-describedby="rename-help rename-error">
+      <p id="rename-help" class="muted">Up to 80 characters. Saved names are kept after a restart.</p>
+      <p id="rename-error" class="breach-text" role="alert"></p>
+      <div class="dialog-actions"><button id="rename-cancel" type="button">Cancel</button><button id="rename-save" type="submit">Save name</button></div>
+    </form>
+  </dialog>
 </body>
 </html>

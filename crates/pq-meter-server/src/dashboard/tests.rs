@@ -416,3 +416,134 @@ async fn an_unavailable_source_fails_the_history_endpoint_too() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+fn rename_request(id: &str, name: &str) -> Request<Body> {
+    Request::put(format!("/api/v1/devices/{id}/label"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::json!({ "name": name }).to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn rename_persists_and_updates_devices_and_last_change_without_changing_detection() {
+    use crate::labels::DeviceLabels;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("labels.json");
+    let source = Arc::new(LiveMeterSource {
+        meter: Arc::new(Mutex::new(MeterState::with_labels(
+            DUMMY_DEVICE_CATALOG.to_vec(),
+            DeviceLabels::load(path.clone()).unwrap(),
+        ))),
+        decision_method: "immediate",
+    });
+    let mut method = ClosestPowerMatch::new(3.0);
+    for power in [100.0, 123.0] {
+        source
+            .meter
+            .lock()
+            .unwrap()
+            .apply_reading(power.into(), &mut method);
+    }
+    let id = DUMMY_DEVICE_CATALOG[0].id;
+    let response = router(source.clone())
+        .oneshot(rename_request(id, "  Büro & Server <1>  "))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot = source.snapshot().unwrap();
+    assert_eq!(snapshot.devices[0].name, "Büro & Server <1>");
+    assert_eq!(
+        snapshot.last_change.unwrap().device_name,
+        "Büro & Server <1>"
+    );
+    assert_eq!(snapshot.readings_received, 2);
+    assert_eq!(snapshot.inferred_power_watts, 23.0);
+    source
+        .meter
+        .lock()
+        .unwrap()
+        .apply_reading(100.0.into(), &mut method);
+    assert_eq!(
+        source.snapshot().unwrap().last_change.unwrap().device_name,
+        "Büro & Server <1>"
+    );
+
+    let restarted = LiveMeterSource {
+        meter: Arc::new(Mutex::new(MeterState::with_labels(
+            DUMMY_DEVICE_CATALOG.to_vec(),
+            DeviceLabels::load(path).unwrap(),
+        ))),
+        decision_method: "immediate",
+    };
+    assert_eq!(
+        restarted.snapshot().unwrap().devices[0].name,
+        "Büro & Server <1>"
+    );
+}
+
+#[tokio::test]
+async fn rename_rejects_invalid_names_unknown_ids_and_reports_failed_persistence() {
+    let source = source();
+    let app = router(source.clone());
+    let id = DUMMY_DEVICE_CATALOG[0].id;
+    for name in [
+        "".to_owned(),
+        "   ".to_owned(),
+        "x".repeat(81),
+        "a\nb".to_owned(),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(rename_request(id, &name))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let response = app
+        .clone()
+        .oneshot(rename_request("missing", "Name"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // This source has no persistence path. It must not pretend to have saved the label.
+    let response = app.oneshot(rename_request(id, "New name")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        source.snapshot().unwrap().devices[0].name,
+        DUMMY_DEVICE_CATALOG[0].name
+    );
+}
+
+#[test]
+fn saved_adaptive_identities_survive_restart_and_a_different_connection_order() {
+    use crate::{
+        decision::{AdaptiveNilm, DecisionMethod, DeviceChange},
+        labels::DeviceLabels,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("labels.json");
+    let mut method = AdaptiveNilm::new();
+    let mut meter = MeterState::with_labels(Vec::new(), DeviceLabels::load(path.clone()).unwrap());
+    for power in [23.0, 83.0, 283.0] {
+        meter.apply_reading(lab_reading(power, 230.0, 50.0), &mut method);
+    }
+    meter.rename_device("learned-1", "Desk lamp").unwrap();
+    meter.rename_device("learned-2", "Monitor").unwrap();
+    let labels = DeviceLabels::load(path).unwrap();
+    let mut restored = AdaptiveNilm::restore(labels.appliances.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(method.learned_profiles()).unwrap(),
+        serde_json::to_value(restored.learned_profiles()).unwrap()
+    );
+    let mut meter = MeterState::with_labels(restored.learned_devices(), labels);
+    meter.apply_reading(lab_reading(23.0, 230.0, 50.0), &mut restored);
+    // The second device reconnects first; the label follows its signature, not discovery order.
+    let change = meter.apply_reading(lab_reading(223.0, 230.0, 50.0), &mut restored);
+    assert!(matches!(change, DeviceChange::Added(device) if device.id == "learned-2"));
+    assert_eq!(meter.snapshot().device_names["learned-2"], "Monitor");
+    let change = meter.apply_reading(lab_reading(283.0, 230.0, 50.0), &mut restored);
+    assert!(matches!(change, DeviceChange::Added(device) if device.id == "learned-1"));
+    // A new discovery cannot reuse a restored ID.
+    let change = meter.apply_reading(lab_reading(783.0, 230.0, 50.0), &mut restored);
+    assert!(matches!(change, DeviceChange::Added(device) if device.id == "learned-3"));
+}

@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use crate::decision::{DecisionMethod, Device, DeviceChange, contains_device};
 use crate::history::{History, HistoryEntry};
 use crate::input::MeterReading;
+use crate::labels::{DeviceLabels, RenameError};
 use crate::transport::GatewayTransport;
 
 /// How much of the recent past the dashboard charts can draw.
@@ -20,6 +21,7 @@ const HISTORY_CAPACITY: usize = 600;
 pub type SharedMeterState = Arc<Mutex<MeterState>>;
 
 pub struct MeterState {
+    labels: DeviceLabels,
     catalog: Vec<Device>,
     active_devices: Vec<Device>,
     latest_reading: Option<MeterReading>,
@@ -33,6 +35,7 @@ pub struct MeterState {
 
 /// An owned, consistent copy lets readers release the lock before formatting a response.
 pub struct MeterSnapshot {
+    pub device_names: std::collections::BTreeMap<String, String>,
     pub catalog: Vec<Device>,
     pub active_devices: Vec<Device>,
     pub total_power_watts: Option<f32>,
@@ -44,8 +47,14 @@ pub struct MeterSnapshot {
 }
 
 impl MeterState {
+    #[cfg(test)]
     pub fn new(catalog: Vec<Device>) -> Self {
+        Self::with_labels(catalog, DeviceLabels::default())
+    }
+
+    pub fn with_labels(catalog: Vec<Device>, labels: DeviceLabels) -> Self {
         Self {
+            labels,
             catalog,
             active_devices: Vec::new(),
             latest_reading: None,
@@ -55,6 +64,25 @@ impl MeterState {
             history: History::bounded(HISTORY_CAPACITY),
             transport: GatewayTransport::default(),
         }
+    }
+
+    pub fn rename_device(&mut self, id: &str, name: &str) -> Result<String, RenameError> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+            return Err(RenameError::InvalidName);
+        }
+        if !self.catalog.iter().any(|device| device.id == id) {
+            return Err(RenameError::NotFound);
+        }
+        // Commit the file before exposing the change to any dashboard client.
+        let mut labels = self.labels.clone();
+        labels.names.insert(id.to_owned(), name.to_owned());
+        labels.save().map_err(|error| {
+            tracing::warn!(%error, "could not save device label");
+            RenameError::Unavailable
+        })?;
+        self.labels = labels;
+        Ok(name.to_owned())
     }
 
     /// Records what the gateway reported about its link. Only a report that carries at
@@ -78,6 +106,7 @@ impl MeterState {
 
     pub fn snapshot(&self) -> MeterSnapshot {
         MeterSnapshot {
+            device_names: self.labels.names.clone(),
             catalog: self.catalog.clone(),
             active_devices: self.active_devices.clone(),
             total_power_watts: self.latest_power(),
@@ -120,6 +149,11 @@ impl MeterState {
                 Some(existing) => *existing = learned,
                 None => self.catalog.push(learned),
             }
+        }
+
+        let profiles = decision_method.learned_profiles();
+        if !profiles.is_empty() {
+            self.labels.appliances = profiles;
         }
 
         let now = Utc::now();

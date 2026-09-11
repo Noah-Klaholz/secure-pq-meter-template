@@ -18,3 +18,21 @@ export const fetchState = () => get('/api/v1/state', 1);
 // The chart series is kept apart from the live snapshot: it grows with the window, while
 // the snapshot is polled every second and has to stay small.
 export const fetchHistory = () => get('/api/v1/history', 1);
+
+export async function renameDevice(id, name) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`/api/v1/devices/${encodeURIComponent(id)}/label`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+      signal: controller.signal,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Could not save the device name.');
+    return payload.name;
+  } finally {
+    clearTimeout(timeout);
+  }
+}

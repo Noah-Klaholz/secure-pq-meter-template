@@ -1,4 +1,4 @@
-//! Local, read-only HTTP dashboard. Assets are embedded so the binary is self-contained.
+//! Local HTTP dashboard. Assets are embedded so the binary is self-contained.
 //!
 //! TODO(security): the dashboard has no authentication. It is bound to `127.0.0.1` by the
 //! caller, independently of `--bind-ip`, so reaching it means already being on the machine;
@@ -15,11 +15,11 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, Path, State},
     http::{StatusCode, header},
     middleware,
     response::IntoResponse,
-    routing::get,
+    routing::{get, put},
 };
 use tokio::net::TcpListener;
 
@@ -35,6 +35,8 @@ pub fn router(source: Arc<dyn SnapshotSource>) -> Router {
         .route("/assets/charts.js", get(|| async { asset("text/javascript; charset=utf-8", include_str!("assets/charts.js")) }))
         .route("/api/v1/state", get(current_state))
         .route("/api/v1/history", get(recent_history))
+        .route("/api/v1/devices/{id}/label", put(rename_device))
+        .layer(DefaultBodyLimit::max(4096))
         .with_state(source)
         .layer(middleware::map_response(|mut response: axum::response::Response| async move {
             let headers = response.headers_mut();
@@ -43,6 +45,39 @@ pub fn router(source: Arc<dyn SnapshotSource>) -> Router {
             headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
             response
         }))
+}
+
+#[derive(serde::Deserialize)]
+struct RenameRequest {
+    name: String,
+}
+
+async fn rename_device(
+    State(source): State<Arc<dyn SnapshotSource>>,
+    Path(id): Path<String>,
+    Json(request): Json<RenameRequest>,
+) -> impl IntoResponse {
+    // Disk persistence runs off the async executor. JSON + PUT also prevents a
+    // cross-origin HTML form from mutating this loopback-only dashboard.
+    let result =
+        tokio::task::spawn_blocking(move || source.rename_device(&id, &request.name)).await;
+    use crate::labels::RenameError;
+    let (status, message) = match result {
+        Ok(Ok(name)) => return Json(serde_json::json!({ "name": name })).into_response(),
+        Ok(Err(RenameError::InvalidName)) => (
+            StatusCode::BAD_REQUEST,
+            "Use a name of 1–80 characters without control characters.",
+        ),
+        Ok(Err(RenameError::NotFound)) => (
+            StatusCode::NOT_FOUND,
+            "This device is no longer in the catalog.",
+        ),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Could not save the device name. Please retry.",
+        ),
+    };
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {

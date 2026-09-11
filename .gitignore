@@ -20,3 +20,6 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 janitza-mal-umg605pro-en.pdf
+
+# Local dashboard device labels and learned signatures
+/device-labels.json

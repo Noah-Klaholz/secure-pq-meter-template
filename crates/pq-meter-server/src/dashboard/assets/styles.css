@@ -836,3 +836,28 @@ td.watch {
     grid-template-columns:1fr;
   }
 }
+
+/* Navigation and device labelling. */
+.view-stack { display:grid; gap:20px; min-width:0; }
+[hidden] { display:none !important; }
+.nav-item { margin-bottom:4px; }
+.nav-item:hover { background:#f0f6f3; }
+.device-details-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+.device-name { white-space:normal; overflow-wrap:anywhere; max-width:300px; }
+.save-status { color:var(--green); font-size:12px; }
+.save-status:empty { display:none; }
+dialog { width:min(440px,calc(100% - 32px)); padding:26px; border:1px solid var(--border); border-radius:12px; color:inherit; box-shadow:0 20px 80px #24332f33; }
+dialog::backdrop { background:#162e2855; }
+dialog h2 { font-size:20px; margin-bottom:10px; }
+dialog label { display:block; margin:24px 0 8px; font-weight:600; }
+dialog input { width:100%; font:inherit; color:inherit; padding:11px; border:1px solid #b8c9bf; border-radius:6px; margin-bottom:10px; }
+input:focus-visible { outline:3px solid #319d7c; outline-offset:2px; }
+.dialog-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:24px; }
+#rename-save { background:var(--green); color:white; }
+@media(max-width:650px) {
+  .sidebar nav { display:flex; overflow-x:auto; gap:4px; }
+  .nav-item { white-space:nowrap; flex-shrink:0; padding:9px 10px; }
+  .device-details-grid { grid-template-columns:1fr; }
+  .devices-panel table { min-width:600px; table-layout:auto; }
+  .devices-panel th:first-child,.devices-panel th:nth-child(2) { width:auto; }
+}
