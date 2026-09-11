@@ -22,6 +22,66 @@ fn source() -> Arc<LiveMeterSource> {
     })
 }
 
+#[tokio::test]
+async fn anomaly_updates_reach_the_live_snapshot_and_can_be_cleared() {
+    let app = router(source(), Arc::new(Mutex::new(None)));
+    let response = app
+        .clone()
+        .oneshot(Request::get("/api/v1/anomaly").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    for payload in [
+        serde_json::json!({
+            "is_anomaly": true, "score": 6.745,
+            "strongest_feature": "l1.voltage_v", "timestamp": "2026-09-11T11:00:00Z"
+        }),
+        serde_json::json!({
+            "is_anomaly": false, "score": 0.0,
+            "strongest_feature": "frequency_hz", "timestamp": "2026-09-11T11:00:01Z"
+        }),
+        serde_json::Value::Null,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/anomaly")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/v1/anomaly").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        if payload.is_null() {
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        } else {
+            assert_eq!(response.status(), StatusCode::OK);
+            let value: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 10_000).await.unwrap())
+                    .unwrap();
+            assert_eq!(value, payload);
+        }
+
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/v1/state").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+        assert_eq!(value["power_quality"]["anomaly"], payload);
+    }
+}
+
 #[test]
 fn snapshot_tracks_baseline_addition_removal_and_preserves_last_change() {
     let source = source();

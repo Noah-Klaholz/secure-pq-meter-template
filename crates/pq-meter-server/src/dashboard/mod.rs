@@ -24,12 +24,13 @@ use axum::{
 use tokio::net::TcpListener;
 
 use crate::quality::ClientThresholdConfig;
-use model::SnapshotSource;
+use model::{AnomalyStatus, SnapshotSource};
 
 #[derive(Clone)]
 struct DashboardAppState {
     source: Arc<dyn SnapshotSource>,
     pending_config: Arc<Mutex<Option<ClientThresholdConfig>>>,
+    anomaly: Arc<Mutex<Option<AnomalyStatus>>>,
 }
 
 pub fn router(
@@ -39,6 +40,7 @@ pub fn router(
     let state = DashboardAppState {
         source,
         pending_config,
+        anomaly: Arc::new(Mutex::new(None)),
     };
     Router::new()
         .route("/", get(|| async { asset("text/html; charset=utf-8", include_str!("assets/index.html")) }))
@@ -49,6 +51,7 @@ pub fn router(
         .route("/assets/charts.js", get(|| async { asset("text/javascript; charset=utf-8", include_str!("assets/charts.js")) }))
         .route("/api/v1/state", get(current_state))
         .route("/api/v1/history", get(recent_history))
+        .route("/api/v1/anomaly", get(current_anomaly).post(update_anomaly))
         .route("/api/v1/forecast", get(current_forecast).post(update_forecast).put(update_forecast))
         .route("/api/v1/devices/{id}/label", put(rename_device))
         .route("/api/v1/settings", get(get_settings))
@@ -104,8 +107,34 @@ fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
 
 async fn current_state(State(state): State<DashboardAppState>) -> impl IntoResponse {
     match state.source.snapshot() {
-        Ok(snapshot) => Json(snapshot).into_response(),
+        Ok(mut snapshot) => {
+            snapshot.power_quality.anomaly = state.anomaly.lock().ok().and_then(|status| status.clone());
+            Json(snapshot).into_response()
+        }
         Err(message) => unavailable(message),
+    }
+}
+
+async fn current_anomaly(State(state): State<DashboardAppState>) -> impl IntoResponse {
+    match state.anomaly.lock() {
+        Ok(status) => match status.clone() {
+            Some(status) => Json(status).into_response(),
+            None => StatusCode::NO_CONTENT.into_response(),
+        },
+        Err(_) => unavailable("anomaly state is unavailable"),
+    }
+}
+
+async fn update_anomaly(
+    State(state): State<DashboardAppState>,
+    Json(anomaly): Json<Option<AnomalyStatus>>,
+) -> impl IntoResponse {
+    match state.anomaly.lock() {
+        Ok(mut status) => {
+            *status = anomaly;
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(_) => unavailable("anomaly state is unavailable"),
     }
 }
 

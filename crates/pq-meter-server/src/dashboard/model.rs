@@ -89,6 +89,8 @@ pub struct Snapshot {
 /// The supply as the meter last measured it.
 #[derive(Serialize)]
 pub struct PowerQuality {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anomaly: Option<AnomalyStatus>,
     pub frequency_hz: Option<f32>,
     /// Signed three-phase real power: negative means the site is exporting.
     pub total_power_watts: Option<f32>,
@@ -98,6 +100,14 @@ pub struct PowerQuality {
     pub flow: Option<&'static str>,
     pub phases: Vec<PhaseStatus>,
     pub violations: Vec<Violation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AnomalyStatus {
+    pub is_anomaly: bool,
+    pub score: f64,
+    pub strongest_feature: Option<String>,
+    pub timestamp: String,
 }
 
 /// One phase of the latest reading, flattened for display.
@@ -210,6 +220,7 @@ fn phase_status(name: &'static str, phase: Option<PhaseReading>) -> PhaseStatus 
 fn power_quality(reading: Option<MeterReading>) -> PowerQuality {
     let Some(reading) = reading else {
         return PowerQuality {
+            anomaly: None,
             frequency_hz: None,
             total_power_watts: None,
             apparent_power_va: None,
@@ -225,6 +236,7 @@ fn power_quality(reading: Option<MeterReading>) -> PowerQuality {
 
     let totals = reading.totals;
     PowerQuality {
+        anomaly: None,
         frequency_hz: reading.frequency_hz,
         total_power_watts: Some(reading.total_power),
         apparent_power_va: totals.and_then(|totals| totals.apparent_power_va),
