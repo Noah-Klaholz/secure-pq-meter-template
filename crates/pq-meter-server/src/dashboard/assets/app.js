@@ -1,6 +1,39 @@
 import { fetchHistory, fetchState, renameDevice } from './api.js';
 import { createOverview } from './overview.js';
 
+const themeToggle = document.getElementById('theme-toggle');
+const themeStorageKey = 'pq-monitor-theme';
+
+function applyTheme(theme) {
+  const dark = theme === 'dark';
+  document.documentElement.dataset.theme = theme;
+  themeToggle.setAttribute('aria-pressed', String(dark));
+  const label = dark ? 'Switch to light mode' : 'Switch to dark mode';
+  themeToggle.setAttribute('aria-label', label);
+  themeToggle.title = label;
+  themeToggle.querySelector('.theme-toggle-label').textContent = dark ? 'Light mode' : 'Dark mode';
+  themeToggle.querySelector('[aria-hidden]').textContent = dark ? '☀' : '☾';
+}
+
+function initialTheme() {
+  try {
+    const saved = localStorage.getItem(themeStorageKey);
+    if (saved === 'light' || saved === 'dark') return saved;
+  } catch {
+  }
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+applyTheme(initialTheme());
+themeToggle.addEventListener('click', () => {
+  const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  applyTheme(theme);
+  try {
+    localStorage.setItem(themeStorageKey, theme);
+  } catch {
+  }
+});
+
 // The shell owns polling/lifecycle; view modules only render a supplied read model.
 const overview = createOverview({ onRename: openRename });
 const refresh = document.getElementById('refresh');
