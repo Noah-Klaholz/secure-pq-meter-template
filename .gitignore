@@ -26,3 +26,9 @@ janitza-mal-umg605pro-en.pdf
 
 # Persistent measurement archive
 /measurement-history.jsonl
+
+# Python environments and cache
+.venv/
+**/__pycache__/
+*.pyc
+

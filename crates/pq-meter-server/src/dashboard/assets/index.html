@@ -136,10 +136,28 @@
             <p class="chart-legend"><span class="key l1">L1</span><span class="key l2">L2</span><span class="key l3">L3</span></p>
           </article>
           <article class="panel chart-panel">
-            <div class="panel-heading"><div><h2>Real power</h2><p>Latest recorded 60 s · negative is export</p></div><span id="chart-power-now" class="small-label">—</span></div>
+            <div class="panel-heading"><div><h2>Real power</h2><p id="chart-power-subhead">Latest recorded 60 s · negative is export</p></div><span id="chart-power-now" class="small-label">—</span></div>
             <div class="chart-body"><svg id="chart-power" class="chart" role="img" aria-label="Three-phase real power over the last 60 seconds"></svg><div class="chart-scale"><span id="chart-power-max">—</span><span id="chart-power-min">—</span></div></div>
+            <p class="chart-legend"><span class="key power">Measured</span><span id="legend-forecast" class="key forecast" style="display:none">Forecast</span></p>
           </article>
         </div>
+
+        <article id="ml-forecast-card" class="panel forecast-card" style="display:none; margin-bottom:24px;">
+          <div class="panel-heading">
+            <div>
+              <h2>Online ML Load Forecasting</h2>
+              <p id="forecast-model-name">River Streaming Regressor</p>
+            </div>
+            <span id="forecast-status-badge" class="badge positive">Active & Learning</span>
+          </div>
+          <div class="panel-body">
+            <dl class="details">
+              <div><dt>Projection horizon</dt><dd id="forecast-horizon">+15 seconds</dd></div>
+              <div><dt>Predicted load (+15s)</dt><dd id="forecast-next-value">—</dd></div>
+              <div><dt>Online running MAE</dt><dd id="forecast-mae">—</dd></div>
+            </dl>
+          </div>
+        </article>
 
         <article class="panel recent-measurements-panel">
           <div class="panel-heading">

@@ -71,6 +71,10 @@ struct Args {
     /// Run the receiver without the local web dashboard.
     #[arg(long)]
     no_dashboard: bool,
+
+    /// Do not automatically start the background online load forecaster.
+    #[arg(long)]
+    no_forecast: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -192,7 +196,25 @@ async fn main() -> anyhow::Result<()> {
         reading_decoder,
     );
     if let Some(listener) = dashboard_listener {
-        println!("  local dashboard:    http://{}/", listener.local_addr()?);
+        let local_addr = listener.local_addr()?;
+        println!("  local dashboard:     http://{local_addr}/");
+
+        let _forecaster = if !args.no_forecast {
+            let dashboard_url = format!("http://{local_addr}");
+            match spawn_forecaster(&dashboard_url) {
+                Ok(child) => {
+                    println!("  online ML forecast:  active (auto-started background predictor)");
+                    Some(child)
+                }
+                Err(error) => {
+                    tracing::debug!("could not auto-start online ML forecaster: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Both services share a lifetime; propagate errors instead of losing a background task.
         tokio::select! {
             result = receiver => result,
@@ -201,4 +223,18 @@ async fn main() -> anyhow::Result<()> {
     } else {
         receiver.await
     }
+}
+
+fn spawn_forecaster(server_url: &str) -> anyhow::Result<tokio::process::Child> {
+    let script = std::path::Path::new("ml/run.sh");
+    anyhow::ensure!(script.exists(), "ml/run.sh not found in current directory");
+
+    let mut cmd = tokio::process::Command::new(script);
+    cmd.arg("--server").arg(server_url);
+    cmd.kill_on_drop(true);
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::inherit());
+
+    let child = cmd.spawn().context("spawning online forecaster")?;
+    Ok(child)
 }

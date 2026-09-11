@@ -34,6 +34,7 @@ pub struct MeterState {
     stored_readings: u64,
     /// What the gateway last reported about the link it delivers over.
     transport: GatewayTransport,
+    latest_forecast: Option<crate::dashboard::model::ForecastSeries>,
 }
 
 /// An owned, consistent copy lets readers release the lock before formatting a response.
@@ -68,7 +69,16 @@ impl MeterState {
             history_store: None,
             stored_readings: 0,
             transport: GatewayTransport::default(),
+            latest_forecast: None,
         }
+    }
+
+    pub fn update_forecast(&mut self, forecast: crate::dashboard::model::ForecastSeries) {
+        self.latest_forecast = Some(forecast);
+    }
+
+    pub fn latest_forecast(&self) -> Option<crate::dashboard::model::ForecastSeries> {
+        self.latest_forecast.clone()
     }
 
     pub fn with_history_file(mut self, path: &std::path::Path) -> anyhow::Result<Self> {

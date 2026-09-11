@@ -45,7 +45,7 @@ function domainOf(values, band) {
  * value is a gap rather than a zero — the meter reports quantities it cannot measure, and
  * a chart must not invent a reading for them.
  */
-export function drawChart(svg, { series, band, window: windowMs, now }) {
+export function drawChart(svg, { series, band, window: windowMs, now, future: futureMs = 0 }) {
   const everyValue = series.flatMap(one => one.points.map(point => point.value));
   const domain = domainOf(everyValue, band);
   svg.setAttribute('viewBox', `0 0 ${WIDTH} ${HEIGHT}`);
@@ -60,8 +60,9 @@ export function drawChart(svg, { series, band, window: windowMs, now }) {
     return { min: null, max: null };
   }
 
+  const totalSpan = windowMs + futureMs;
   const start = now - windowMs;
-  const x = (at) => ((at - start) / windowMs) * WIDTH;
+  const x = (at) => ((at - start) / totalSpan) * WIDTH;
   const y = (value) => HEIGHT - ((value - domain.min) / (domain.max - domain.min)) * HEIGHT;
 
   // The band the readings are judged against, drawn behind them.
@@ -70,6 +71,16 @@ export function drawChart(svg, { series, band, window: windowMs, now }) {
     const bottom = y(Math.max(band.min, domain.min));
     svg.append(element('rect', {
       x: 0, y: top, width: WIDTH, height: Math.max(0, bottom - top), class: 'chart-band',
+    }));
+  }
+
+  // If predicting into the future, draw a vertical marker at "now"
+  if (futureMs > 0) {
+    const nowX = Math.max(0, Math.min(WIDTH, x(now)));
+    svg.append(element('line', {
+      x1: nowX.toFixed(2), y1: 0,
+      x2: nowX.toFixed(2), y2: HEIGHT,
+      class: 'chart-now-marker',
     }));
   }
 
