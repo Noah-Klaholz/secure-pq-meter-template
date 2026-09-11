@@ -114,9 +114,7 @@ class TestHistoryLoaders(unittest.TestCase):
         timestamp = "2026-09-11T10:00:00+00:00"
         reading = self.reading(123.0)
         reading.pop("heartbeat")
-        self.create_database(
-            [(timestamp, 0, 123.0, 1, json.dumps(reading))]
-        )
+        self.create_database([(timestamp, 0, 123.0, 1, json.dumps(reading))])
 
         measurements = load_sqlite_history(self.database_path)
 
@@ -156,7 +154,9 @@ class TestHistoryLoaders(unittest.TestCase):
             "marker": "runtime",
         }
 
-        combined = combine_measurements([jsonl_measurement], [sqlite_measurement])
+        combined = combine_measurements(
+            [jsonl_measurement], [sqlite_measurement]
+        )
 
         self.assertEqual(len(combined), 1)
         self.assertEqual(combined[0]["source"], "jsonl")
@@ -318,7 +318,9 @@ class TestHistoryLoaders(unittest.TestCase):
         self.assertNotIn("frequency_hz", baseline)
 
     def test_mad_zero_uses_standard_deviation_fallback(self):
-        measurements = [self.reading(100.0) for _ in range(29)] + [self.reading(101.0)]
+        measurements = [self.reading(100.0) for _ in range(29)] + [
+            self.reading(101.0)
+        ]
         measurements[-1]["frequency_hz"] = 51.0
 
         baseline = build_baseline(measurements)
@@ -352,7 +354,8 @@ class TestHistoryLoaders(unittest.TestCase):
 
         self.assertEqual(result["strongest_feature"], "l1.thd_current_pct")
         self.assertEqual(
-            result["overall_score"], result["feature_scores"]["l1.thd_current_pct"]
+            result["overall_score"],
+            result["feature_scores"]["l1.thd_current_pct"],
         )
 
     def test_sqlite_sample_can_be_scored_after_fixed_baseline_creation(self):
@@ -368,10 +371,20 @@ class TestHistoryLoaders(unittest.TestCase):
     def test_cli_jsonl_and_sqlite_together(self):
         self.write_jsonl_measurements([self.reading(100.0) for _ in range(30)])
         self.create_database(
-            [("2026-09-11T11:00:00+00:00", 0, 1000.0, 0, json.dumps(self.reading(1000.0)))]
+            [
+                (
+                    "2026-09-11T11:00:00+00:00",
+                    0,
+                    1000.0,
+                    0,
+                    json.dumps(self.reading(1000.0)),
+                )
+            ]
         )
 
-        result = self.run_cli("--jsonl", str(self.jsonl_path), "--db", str(self.database_path))
+        result = self.run_cli(
+            "--jsonl", str(self.jsonl_path), "--db", str(self.database_path)
+        )
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("JSONL samples:", result.stdout)
@@ -382,7 +395,12 @@ class TestHistoryLoaders(unittest.TestCase):
     def test_cli_jsonl_only(self):
         self.write_jsonl_measurements([self.reading(100.0) for _ in range(30)])
 
-        result = self.run_cli("--jsonl", str(self.jsonl_path), "--db", str(self.root / "missing.db"))
+        result = self.run_cli(
+            "--jsonl",
+            str(self.jsonl_path),
+            "--db",
+            str(self.root / "missing.db"),
+        )
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("JSONL samples:       30", result.stdout)
@@ -391,12 +409,23 @@ class TestHistoryLoaders(unittest.TestCase):
     def test_cli_sqlite_only(self):
         self.create_database(
             [
-                (f"2026-09-11T10:00:{index:02d}+00:00", index, 100.0, 0, json.dumps(self.reading()))
+                (
+                    f"2026-09-11T10:00:{index:02d}+00:00",
+                    index,
+                    100.0,
+                    0,
+                    json.dumps(self.reading()),
+                )
                 for index in range(30)
             ]
         )
 
-        result = self.run_cli("--jsonl", str(self.root / "missing.jsonl"), "--db", str(self.database_path))
+        result = self.run_cli(
+            "--jsonl",
+            str(self.root / "missing.jsonl"),
+            "--db",
+            str(self.database_path),
+        )
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("JSONL samples:       0", result.stdout)
@@ -404,7 +433,10 @@ class TestHistoryLoaders(unittest.TestCase):
 
     def test_cli_missing_sources_are_graceful(self):
         result = self.run_cli(
-            "--jsonl", str(self.root / "missing.jsonl"), "--db", str(self.root / "missing.db")
+            "--jsonl",
+            str(self.root / "missing.jsonl"),
+            "--db",
+            str(self.root / "missing.db"),
         )
 
         self.assertEqual(result.returncode, 0)
@@ -412,7 +444,9 @@ class TestHistoryLoaders(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
 
     def test_cli_custom_threshold_and_result_limit(self):
-        self.write_jsonl_measurements([self.reading(100.0) for _ in range(30)] + [self.reading(1000.0)])
+        self.write_jsonl_measurements(
+            [self.reading(100.0) for _ in range(30)] + [self.reading(1000.0)]
+        )
         anomalous = self.reading(1000.0)
         anomalous["l1"]["voltage_v"] = 500.0
         self.create_database(
@@ -420,8 +454,14 @@ class TestHistoryLoaders(unittest.TestCase):
         )
 
         result = self.run_cli(
-            "--jsonl", str(self.jsonl_path), "--db", str(self.database_path),
-            "--threshold", "0.1", "--limit", "1",
+            "--jsonl",
+            str(self.jsonl_path),
+            "--db",
+            str(self.database_path),
+            "--threshold",
+            "0.1",
+            "--limit",
+            "1",
         )
 
         self.assertEqual(result.returncode, 0)
@@ -437,13 +477,25 @@ class TestHistoryLoaders(unittest.TestCase):
         self.create_database(
             [
                 ("2026-09-11T11:00:00+00:00", 0, 1000.0, 0, json.dumps(first)),
-                ("2026-09-11T11:01:00+00:00", 60, 1100.0, 0, json.dumps(second)),
+                (
+                    "2026-09-11T11:01:00+00:00",
+                    60,
+                    1100.0,
+                    0,
+                    json.dumps(second),
+                ),
             ]
         )
 
         result = self.run_cli(
-            "--jsonl", str(self.jsonl_path), "--db", str(self.database_path),
-            "--threshold", "0.1", "--limit", "10",
+            "--jsonl",
+            str(self.jsonl_path),
+            "--db",
+            str(self.database_path),
+            "--threshold",
+            "0.1",
+            "--limit",
+            "10",
         )
 
         self.assertEqual(result.returncode, 0)
@@ -457,13 +509,21 @@ class TestHistoryLoaders(unittest.TestCase):
         self.write_jsonl_measurements(jsonl_measurements)
         self.create_database(
             [
-                (f"2026-09-11T11:00:{index:02d}+00:00", index, 200.0, 0, json.dumps(self.reading(200.0)))
+                (
+                    f"2026-09-11T11:00:{index:02d}+00:00",
+                    index,
+                    200.0,
+                    0,
+                    json.dumps(self.reading(200.0)),
+                )
                 for index in range(30)
             ]
         )
 
         analysis = analyze_sources(
-            self.jsonl_path, self.database_path, baseline_prefilter_threshold=6.0
+            self.jsonl_path,
+            self.database_path,
+            baseline_prefilter_threshold=6.0,
         )
 
         self.assertEqual(analysis["total_count"], 60)
@@ -482,7 +542,10 @@ class TestHistoryLoaders(unittest.TestCase):
                     json.dumps(
                         {
                             **self.reading(10000.0),
-                            "l1": {**self.reading(10000.0)["l1"], "voltage_v": 500.0},
+                            "l1": {
+                                **self.reading(10000.0)["l1"],
+                                "voltage_v": 500.0,
+                            },
                         }
                     ),
                 )
@@ -504,7 +567,9 @@ class TestHistoryLoaders(unittest.TestCase):
         jsonl_score = score_measurement(jsonl_sample, baseline)
         sqlite_score = score_measurement(sqlite_sample, baseline)
 
-        self.assertEqual(jsonl_score["overall_score"], sqlite_score["overall_score"])
+        self.assertEqual(
+            jsonl_score["overall_score"], sqlite_score["overall_score"]
+        )
 
     def test_stable_mixed_operating_states_have_low_final_anomaly_rate(self):
         first_state = [self.reading(100.0) for _ in range(30)]
@@ -514,7 +579,9 @@ class TestHistoryLoaders(unittest.TestCase):
 
         scored = score_history(combined, baseline=baseline)
 
-        anomaly_rate = sum(result["is_anomaly"] for result in scored) / len(scored)
+        anomaly_rate = sum(result["is_anomaly"] for result in scored) / len(
+            scored
+        )
         self.assertLess(anomaly_rate, 0.1)
 
 
