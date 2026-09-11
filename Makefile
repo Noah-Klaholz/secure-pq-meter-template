@@ -49,7 +49,7 @@ PI_USER ?= anapaya
 PI_HOST ?= edh-anapaya.edu.ds.fhnw.ch
 PI_DEST ?= /home/anapaya
 
-# This is not a good idea but I don't wanna do it with ssh key right now XD
+# This is not a good idea but I don't wanna do it with ssh -o StrictHostKeyChecking=accept-new key right now XD
 PI_PASS ?= anapaya
 
 run-server:
@@ -76,10 +76,10 @@ run-client:
 	fi
 	@echo "Running client on $(PI_HOST) connecting to server: $(SERVER)"
 	@if [ -n "$(PI_PASS)" ] && command -v sshpass >/dev/null 2>&1; then \
-		sshpass -p '$(PI_PASS)' ssh -t $(PI_USER)@$(PI_HOST) "cd $(PI_DEST) && ./pq-meter-client --server $(SERVER)"; \
+		sshpass -p '$(PI_PASS)' ssh -o StrictHostKeyChecking=accept-new -t $(PI_USER)@$(PI_HOST) "cd $(PI_DEST) && ./pq-meter-client --server $(SERVER)"; \
 	else \
 		if [ -n "$(PI_PASS)" ]; then echo "Warning: PI_PASS is set but 'sshpass' is not installed. Asking interactively..."; fi; \
-		ssh -t $(PI_USER)@$(PI_HOST) "cd $(PI_DEST) && ./pq-meter-client --server $(SERVER)"; \
+		ssh -o StrictHostKeyChecking=accept-new -t $(PI_USER)@$(PI_HOST) "cd $(PI_DEST) && ./pq-meter-client --server $(SERVER)"; \
 	fi
 
 client: run-client
@@ -87,10 +87,10 @@ client: run-client
 kill-client:
 	@echo "Stopping pq-meter-client on $(PI_HOST)..."
 	@if [ -n "$(PI_PASS)" ] && command -v sshpass >/dev/null 2>&1; then \
-		sshpass -p '$(PI_PASS)' ssh $(PI_USER)@$(PI_HOST) "pkill -INT -f pq-meter-client || killall -q -INT pq-meter-client || true"; \
+		sshpass -p '$(PI_PASS)' ssh -o StrictHostKeyChecking=accept-new $(PI_USER)@$(PI_HOST) "pkill -INT -f pq-meter-client || killall -q -INT pq-meter-client || true"; \
 	else \
 		if [ -n "$(PI_PASS)" ]; then echo "Warning: PI_PASS is set but 'sshpass' is not installed. Asking interactively..."; fi; \
-		ssh $(PI_USER)@$(PI_HOST) "pkill -INT -f pq-meter-client || killall -q -INT pq-meter-client || true"; \
+		ssh -o StrictHostKeyChecking=accept-new $(PI_USER)@$(PI_HOST) "pkill -INT -f pq-meter-client || killall -q -INT pq-meter-client || true"; \
 	fi
 	@echo "Stopped."
 
@@ -126,15 +126,15 @@ build-client:
 
 # Copies next to the old binary and moves it into place: writing straight over the file
 # fails while a client is still running from it, and the move leaves that process alone.
-deploy-client: build-client
+deploy-client: build-client kill-client
 	@echo "Copying client binary to $(PI_USER)@$(PI_HOST):$(PI_DEST) ..."
 	@if [ -n "$(PI_PASS)" ] && command -v sshpass >/dev/null 2>&1; then \
-		sshpass -p '$(PI_PASS)' scp target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST)/pq-meter-client.new && \
-		sshpass -p '$(PI_PASS)' ssh $(PI_USER)@$(PI_HOST) "chmod +x $(PI_DEST)/pq-meter-client.new && mv $(PI_DEST)/pq-meter-client.new $(PI_DEST)/pq-meter-client"; \
+		sshpass -p '$(PI_PASS)' scp -o StrictHostKeyChecking=accept-new target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST)/pq-meter-client.new && \
+		sshpass -p '$(PI_PASS)' ssh -o StrictHostKeyChecking=accept-new $(PI_USER)@$(PI_HOST) "chmod +x $(PI_DEST)/pq-meter-client.new && mv $(PI_DEST)/pq-meter-client.new $(PI_DEST)/pq-meter-client"; \
 	else \
 		if [ -n "$(PI_PASS)" ]; then echo "Warning: PI_PASS is set but 'sshpass' is not installed. Asking interactively..."; fi; \
-		scp target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST)/pq-meter-client.new && \
-		ssh $(PI_USER)@$(PI_HOST) "chmod +x $(PI_DEST)/pq-meter-client.new && mv $(PI_DEST)/pq-meter-client.new $(PI_DEST)/pq-meter-client"; \
+		scp -o StrictHostKeyChecking=accept-new target/aarch64-unknown-linux-gnu/release/pq-meter-client $(PI_USER)@$(PI_HOST):$(PI_DEST)/pq-meter-client.new && \
+		ssh -o StrictHostKeyChecking=accept-new $(PI_USER)@$(PI_HOST) "chmod +x $(PI_DEST)/pq-meter-client.new && mv $(PI_DEST)/pq-meter-client.new $(PI_DEST)/pq-meter-client"; \
 	fi
 	@echo "Deployed. Restart the client to pick it up: make run-client"
 
@@ -152,10 +152,10 @@ build-pinger:
 deploy-pinger: build-pinger
 	@echo "Copying pinger binary to $(PI_USER)@$(PI_HOST):$(PI_DEST) ..."
 	@if [ -n "$(PI_PASS)" ] && command -v sshpass >/dev/null 2>&1; then \
-		sshpass -p '$(PI_PASS)' scp target/aarch64-unknown-linux-gnu/release/pinger $(PI_USER)@$(PI_HOST):$(PI_DEST); \
+		sshpass -p '$(PI_PASS)' scp -o StrictHostKeyChecking=accept-new target/aarch64-unknown-linux-gnu/release/pinger $(PI_USER)@$(PI_HOST):$(PI_DEST); \
 	else \
 		if [ -n "$(PI_PASS)" ]; then echo "Warning: PI_PASS is set but 'sshpass' is not installed. Asking interactively..."; fi; \
-		scp target/aarch64-unknown-linux-gnu/release/pinger $(PI_USER)@$(PI_HOST):$(PI_DEST); \
+		scp -o StrictHostKeyChecking=accept-new target/aarch64-unknown-linux-gnu/release/pinger $(PI_USER)@$(PI_HOST):$(PI_DEST); \
 	fi
 
 forecast:
