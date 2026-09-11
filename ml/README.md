@@ -78,7 +78,7 @@ anomaly percentage. Run it from the repository root with:
 
 ```bash
 python ml/anomaly.py \
-   --jsonl measurement-history.jsonl \
+   --jsonl data/measurement-history_chris.jsonl \
    --db data/history.db \
    --threshold 3.5 \
    --limit 10
