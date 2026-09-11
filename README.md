@@ -722,6 +722,21 @@ brew install --cask raspberry-pi-imager
 ssh <user>@<hostname>.local
 ```
 
+The `.local` name is mDNS, which only reaches as far as the local link. It works when the Pi
+and the laptop share a network, and fails on a campus or guest network that puts clients in
+different routed subnets — which is what `fhnw-public` does. Check whether the network's own
+DNS knows the Pi instead; a DHCP server that registers client hostnames gives you a name that
+works from anywhere on the network:
+
+```bash
+getent hosts <hostname>          # e.g. -> 10.0.5.23 <hostname>.example.ac.uk
+```
+
+Prefer that name over the address wherever you can. A short DHCP lease means the Pi comes
+back on a different address after any gap longer than the lease, and on a large network that
+can be a different subnet as well; a name follows it, an address does not. Set `PI_HOST` in
+the `Makefile` to whichever of the two works for you.
+
 ## Cross compiling for the Raspberry Pi 5
 
 The Pi is slow at compiling, so build on your laptop and copy the binary over. The target is
@@ -759,6 +774,9 @@ in `target/aarch64-unknown-linux-gnu/release/pq-meter-client`.
 ```bash
 scp target/aarch64-unknown-linux-gnu/release/pq-meter-client <user>@<hostname>.local:
 ```
+
+`make deploy-client` does the same thing and uses `PI_HOST`, so it follows whichever name you
+settled on [above](#writing-the-card).
 
 Then run it on the Pi as shown [above](#run-it-between-the-pi-and-the-laptop).
 
