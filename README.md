@@ -309,8 +309,7 @@ location; relative paths resolve from the server's working directory. Each succe
 atomically retains the labels and all currently learned appliance signatures, including
 their IDs and distortion current. Restarting restores those identities and relearns the
 idle background from the first reading. As before, appliances already on at startup are
-part of that background until they can be inferred from later changes. Unsaved discoveries
-and measurement history remain session data. Save errors leave the previous label intact.
+part of that background until they can be inferred from later changes. Unsaved device discoveries remain session data. Measurement history is archived separately. Save errors leave the previous label intact.
 
 The live state refreshes once per second. Across the three views, the dashboard shows:
 
@@ -401,12 +400,11 @@ arrived. A gateway that has stopped sending cannot claim to be connected.
 
 ### Reading history
 
-`GET /api/v1/history` serves the accepted readings of the last 60 seconds, oldest first, as
+`GET /api/v1/history` serves the latest recorded 60-second window, oldest first, as
 the narrow per-sample shape the charts plot. It is kept apart from `GET /api/v1/state`
 because the live view is polled every second and has to stay small while the series grows
-with the window; the dashboard fetches it half as often. Retention is bounded in memory
-(`History::bounded`), so a receiver left running does not grow without limit, and a restart
-resets it.
+with the window; the dashboard fetches it half as often. The chart cache is bounded in memory
+(`History::bounded`); startup restores that cache from the persistent measurement archive.
 
 Because the gateway only sends readings that cross its noise threshold, an idle
 installation would otherwise produce an empty chart and a link that reports itself stale
@@ -452,12 +450,29 @@ The frontend separates HTTP requests (`assets/api.js`), polling and lifecycle
 (`assets/charts.js`). Hash navigation in `app.js` switches the three view sections, and
 the rename dialog stays independent of the polling-rendered device rows.
 
-History is **in memory and bounded**: the last 60 seconds of accepted readings, capped by
-`History::bounded`, reset by a restart. Device changes are still only kept as the single
-most recent one. To go further, persist timestamped readings and changes at the ingestion
-boundary and extend `/api/v1/history` with a time range and paging. Keep historical queries
-separate from the lightweight live snapshot; do not grow the live response into an
-unbounded event list.
+History is **persistent by default**. Every validated gateway request is appended as one
+JSON line to `measurement-history.jsonl` in the server's working directory. Use
+`--history-file /path/to/measurement-history.jsonl` to select a durable location. Each line
+contains `schema_version: 1`, the receiver's `received_at` timestamp and the full `readings`
+array (including phases, nullable measurements, meter timestamps and heartbeat flags).
+All accepted readings are retained on disk; the archive is not automatically pruned.
+
+The receiver commits and syncs the complete batch before updating live state or
+acknowledging it. Storage failures return HTTP 503 without applying the batch to device
+inference. A partial trailing batch from an interrupted write is discarded at startup;
+malformed complete records or unsupported schema versions stop startup rather than silently
+losing data. An exclusive file lock prevents two receivers writing the same archive.
+As with the existing ingestion API, a request retried after an ambiguous/lost acknowledgement
+can be stored twice; the protocol has no batch IDs for deduplication.
+
+Startup streams the archive and retains only the latest 600 readings in memory. The
+History tab displays the last recorded 60-second window even after a long downtime, with
+the original dates/times and the total saved reading count. Older readings remain in the
+JSONL archive for analysis; the dashboard does not yet offer time-range browsing. The
+API adds `persistent` and `stored_readings` to the history response. Saved measurements
+are not replayed into live device inference or transport state: each receiver session
+establishes a fresh baseline from new readings. Device changes themselves are still only
+kept as the most recent change in the current session.
 
 Validation for this module:
 

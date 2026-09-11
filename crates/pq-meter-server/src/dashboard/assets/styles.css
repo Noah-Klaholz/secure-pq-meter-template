@@ -861,3 +861,5 @@ input:focus-visible { outline:3px solid #319d7c; outline-offset:2px; }
   .devices-panel table { min-width:600px; table-layout:auto; }
   .devices-panel th:first-child,.devices-panel th:nth-child(2) { width:auto; }
 }
+
+.history-summary { color:var(--muted); font-size:12px; line-height:1.7; margin:0 0 22px; }

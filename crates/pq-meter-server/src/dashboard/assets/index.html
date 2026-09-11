@@ -23,7 +23,7 @@
         <a class="nav-item" href="#connected-devices">Connected Devices</a>
         <a class="nav-item" href="#history">History</a>
       </nav>
-      <div class="sidebar-note"><span class="tiny-dot"></span> SCION meter receiver<p>Current session<br>Last 60 s in memory</p></div>
+      <div class="sidebar-note"><span class="tiny-dot"></span> SCION meter receiver<p>Measurement history<br>Saved on receiver</p></div>
     </aside>
     <main id="main" tabindex="-1">
         <div class="page-heading">
@@ -124,18 +124,19 @@
         </div>
       </section>
       <section id="history" class="dashboard-view" aria-label="History" hidden>
+        <p id="history-summary" class="history-summary" role="status">Loading saved measurements…</p>
         <div class="chart-grid">
           <article class="panel chart-panel">
-            <div class="panel-heading"><div><h2>Frequency</h2><p>Last 60 s · band 49.5–50.5 Hz</p></div><span id="chart-frequency-now" class="small-label">—</span></div>
+            <div class="panel-heading"><div><h2>Frequency</h2><p>Latest recorded 60 s · band 49.5–50.5 Hz</p></div><span id="chart-frequency-now" class="small-label">—</span></div>
             <div class="chart-body"><svg id="chart-frequency" class="chart" role="img" aria-label="Grid frequency over the last 60 seconds"></svg><div class="chart-scale"><span id="chart-frequency-max">—</span><span id="chart-frequency-min">—</span></div></div>
           </article>
           <article class="panel chart-panel">
-            <div class="panel-heading"><div><h2>Voltage</h2><p>Last 60 s · band 207–253 V</p></div><span id="chart-voltage-now" class="small-label">—</span></div>
+            <div class="panel-heading"><div><h2>Voltage</h2><p>Latest recorded 60 s · band 207–253 V</p></div><span id="chart-voltage-now" class="small-label">—</span></div>
             <div class="chart-body"><svg id="chart-voltage" class="chart" role="img" aria-label="Phase voltages over the last 60 seconds"></svg><div class="chart-scale"><span id="chart-voltage-max">—</span><span id="chart-voltage-min">—</span></div></div>
             <p class="chart-legend"><span class="key l1">L1</span><span class="key l2">L2</span><span class="key l3">L3</span></p>
           </article>
           <article class="panel chart-panel">
-            <div class="panel-heading"><div><h2>Real power</h2><p>Last 60 s · negative is export</p></div><span id="chart-power-now" class="small-label">—</span></div>
+            <div class="panel-heading"><div><h2>Real power</h2><p>Latest recorded 60 s · negative is export</p></div><span id="chart-power-now" class="small-label">—</span></div>
             <div class="chart-body"><svg id="chart-power" class="chart" role="img" aria-label="Three-phase real power over the last 60 seconds"></svg><div class="chart-scale"><span id="chart-power-max">—</span><span id="chart-power-min">—</span></div></div>
           </article>
         </div>

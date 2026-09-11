@@ -12,6 +12,7 @@ mod api;
 mod dashboard;
 mod decision;
 pub mod history;
+mod history_store;
 mod input;
 mod labels;
 mod meter;
@@ -62,6 +63,10 @@ struct Args {
     /// File retaining user labels and learned signatures across receiver restarts.
     #[arg(long, default_value = "device-labels.json")]
     device_labels_file: std::path::PathBuf,
+
+    /// Append-only measurement archive, restored when the receiver starts.
+    #[arg(long, default_value = "measurement-history.jsonl")]
+    history_file: std::path::PathBuf,
 
     /// Run the receiver without the local web dashboard.
     #[arg(long)]
@@ -151,10 +156,10 @@ async fn main() -> anyhow::Result<()> {
         DecisionMethodArg::Adaptive => decision_method.learned_devices(),
         _ => decision::DUMMY_DEVICE_CATALOG.to_vec(),
     };
-    let meter = Arc::new(Mutex::new(meter::MeterState::with_labels(
-        seed_catalog,
-        labels,
-    )));
+    let meter = Arc::new(Mutex::new(
+        meter::MeterState::with_labels(seed_catalog, labels)
+            .with_history_file(&args.history_file)?,
+    ));
     let decision_method: api::SharedDecisionMethod = Arc::new(Mutex::new(decision_method));
     let reading_decoder: input::SharedReadingDecoder = Arc::new(input::JsonReadingDecoder);
 

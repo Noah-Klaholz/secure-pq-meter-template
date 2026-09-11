@@ -82,6 +82,22 @@ async fn receive(
         Err(message) => return (StatusCode::BAD_REQUEST, format!("{message}\n")),
     };
 
+    // File writes and fsync must not block a Tokio runtime worker.
+    tokio::task::spawn_blocking(move || apply_batch(state, readings, reported_transport))
+        .await
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "measurement processing failed\n".to_owned(),
+            )
+        })
+}
+
+fn apply_batch(
+    state: AppState,
+    readings: Vec<crate::input::MeterReading>,
+    reported_transport: GatewayTransport,
+) -> (StatusCode, String) {
     let mut meter = match state.meter.lock() {
         Ok(meter) => meter,
         Err(_) => {
@@ -101,6 +117,16 @@ async fn receive(
         }
     };
 
+    let received_at = match meter.persist_readings(&readings) {
+        Ok(at) => at,
+        Err(error) => {
+            tracing::error!(%error, "could not persist measurement batch");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "history storage is unavailable; batch was not accepted\n".to_owned(),
+            );
+        }
+    };
     meter.record_transport(reported_transport);
 
     let count = readings.len();
@@ -109,7 +135,7 @@ async fn receive(
     let mut response = String::new();
     for reading in readings {
         let was_first_reading = meter.latest_power().is_none();
-        let change = meter.apply_reading(reading, decision_method.as_mut());
+        let change = meter.apply_reading_at(reading, decision_method.as_mut(), received_at);
         match change {
             DeviceChange::Added(_) => additions += 1,
             DeviceChange::Removed(_) => removals += 1,
@@ -226,6 +252,47 @@ mod tests {
             decision_method: Arc::new(Mutex::new(method)),
             reading_decoder: Arc::new(crate::input::JsonReadingDecoder),
         }
+    }
+
+    #[tokio::test]
+    async fn accepted_batches_survive_restart_and_rejected_batches_never_reach_disk() {
+        use crate::{history::History, history_store::HistoryStore, labels::DeviceLabels};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.jsonl");
+        let state = AppState {
+            meter: Arc::new(Mutex::new(
+                MeterState::with_labels(DUMMY_DEVICE_CATALOG.to_vec(), DeviceLabels::default())
+                    .with_history_file(&path)
+                    .unwrap(),
+            )),
+            decision_method: Arc::new(Mutex::new(Box::new(ClosestPowerMatch::new(3.0)))),
+            reading_decoder: Arc::new(crate::input::JsonReadingDecoder),
+        };
+        let (status, _) = post_json(
+            state.clone(),
+            serde_json::json!([
+                { "total_power": 100.0 }, { "total_power": 123.0, "heartbeat": true }
+            ]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let committed = std::fs::read(&path).unwrap();
+        let (status, _) = post_json(
+            state.clone(),
+            serde_json::json!([
+                { "total_power": 200.0 }, { "total_power": "invalid" }
+            ]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(std::fs::read(&path).unwrap(), committed);
+        assert_eq!(state.meter.lock().unwrap().snapshot().readings_received, 2);
+        drop(state);
+        let mut history = History::bounded(600);
+        let (_, count) = HistoryStore::open(&path, &mut history).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(history.all()[0].data.total_power, 100.0);
+        assert!(history.all()[1].data.heartbeat);
     }
 
     async fn post_json(state: AppState, body: serde_json::Value) -> (StatusCode, String) {

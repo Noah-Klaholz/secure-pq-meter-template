@@ -23,3 +23,6 @@ janitza-mal-umg605pro-en.pdf
 
 # Local dashboard device labels and learned signatures
 /device-labels.json
+
+# Persistent measurement archive
+/measurement-history.jsonl

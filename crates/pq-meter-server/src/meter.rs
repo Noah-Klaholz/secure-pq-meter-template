@@ -1,4 +1,4 @@
-//! Transport-independent, in-memory state. Only accepted readings update this store.
+//! Transport-independent live state and a persistent archive of accepted readings.
 
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 
 use crate::decision::{DecisionMethod, Device, DeviceChange, contains_device};
 use crate::history::{History, HistoryEntry};
+use crate::history_store::HistoryStore;
 use crate::input::MeterReading;
 use crate::labels::{DeviceLabels, RenameError};
 use crate::transport::GatewayTransport;
@@ -29,6 +30,8 @@ pub struct MeterState {
     last_received_at: Option<DateTime<Utc>>,
     last_change: Option<(DeviceChange, DateTime<Utc>)>,
     history: History<MeterReading>,
+    history_store: Option<HistoryStore>,
+    stored_readings: u64,
     /// What the gateway last reported about the link it delivers over.
     transport: GatewayTransport,
 }
@@ -62,8 +65,41 @@ impl MeterState {
             last_received_at: None,
             last_change: None,
             history: History::bounded(HISTORY_CAPACITY),
+            history_store: None,
+            stored_readings: 0,
             transport: GatewayTransport::default(),
         }
+    }
+
+    pub fn with_history_file(mut self, path: &std::path::Path) -> anyhow::Result<Self> {
+        let (store, count) = HistoryStore::open(path, &mut self.history)?;
+        self.history_store = Some(store);
+        self.stored_readings = count;
+        Ok(self)
+    }
+
+    pub fn history_is_persistent(&self) -> bool {
+        self.history_store.is_some()
+    }
+
+    pub fn stored_readings(&self) -> u64 {
+        self.stored_readings
+    }
+
+    /// Commit the validated batch before changing either the live state or inference.
+    pub fn persist_readings(&mut self, readings: &[MeterReading]) -> anyhow::Result<DateTime<Utc>> {
+        let now = Utc::now();
+        // Keep archive order stable if the system clock moves backwards.
+        let at = self
+            .history
+            .latest()
+            .map(|entry| DateTime::<Utc>::from(entry.timestamp).max(now))
+            .unwrap_or(now);
+        if let Some(store) = &mut self.history_store {
+            store.append(readings, at)?;
+            self.stored_readings += readings.len() as u64;
+        }
+        Ok(at)
     }
 
     pub fn rename_device(&mut self, id: &str, name: &str) -> Result<String, RenameError> {
@@ -94,10 +130,17 @@ impl MeterState {
         }
     }
 
-    /// The readings of the last [`HISTORY_WINDOW`], for the dashboard charts.
-    pub fn recent_history(&self, now: SystemTime) -> &[HistoryEntry<MeterReading>] {
-        self.history
-            .since(now.checked_sub(HISTORY_WINDOW).unwrap_or(now))
+    /// The last recorded window stays visible during downtime and after a restart.
+    pub fn recent_history(&self) -> &[HistoryEntry<MeterReading>] {
+        let Some(latest) = self.history.latest() else {
+            return self.history.all();
+        };
+        self.history.since(
+            latest
+                .timestamp
+                .checked_sub(HISTORY_WINDOW)
+                .unwrap_or(latest.timestamp),
+        )
     }
 
     pub fn latest_power(&self) -> Option<f32> {
@@ -118,10 +161,23 @@ impl MeterState {
         }
     }
 
+    #[cfg(test)]
     pub fn apply_reading(
         &mut self,
         reading: MeterReading,
         decision_method: &mut dyn DecisionMethod,
+    ) -> DeviceChange {
+        let at = self
+            .persist_readings(&[reading])
+            .expect("persisting test reading");
+        self.apply_reading_at(reading, decision_method, at)
+    }
+
+    pub fn apply_reading_at(
+        &mut self,
+        reading: MeterReading,
+        decision_method: &mut dyn DecisionMethod,
+        now: DateTime<Utc>,
     ) -> DeviceChange {
         // A keepalive says the gateway saw no change, and may carry a level it is still
         // settling on. Feeding one to the decision method would match an intermediate
@@ -156,7 +212,6 @@ impl MeterState {
             self.labels.appliances = profiles;
         }
 
-        let now = Utc::now();
         match change {
             DeviceChange::Added(device) => {
                 if !contains_device(&self.catalog, device.id) {

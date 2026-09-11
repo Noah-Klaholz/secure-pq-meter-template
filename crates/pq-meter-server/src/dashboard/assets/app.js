@@ -56,7 +56,7 @@ update();
 const views = {
   'power-quality': ['Power Quality', 'POWER QUALITY / LIVE STATE', 'Three-phase measurements from the meter, carried over SCION.'],
   'connected-devices': ['Connected Devices', 'DEVICES / LIVE STATE', 'Recognized devices, saved names and inferred activity.'],
-  history: ['History', 'MEASUREMENTS / LAST 60 SECONDS', 'Recent frequency, voltage and power trends from this receiver session.'],
+  history: ['History', 'MEASUREMENTS / SAVED HISTORY', 'Measurements are saved across restarts. Charts show the latest recorded 60 seconds.'],
 };
 function navigate(focus = false) {
   const requested = location.hash.slice(1);

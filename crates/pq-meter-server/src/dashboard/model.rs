@@ -3,8 +3,6 @@
 //! A future database-backed source can implement `SnapshotSource`. Historical queries
 //! should get a separate endpoint and model rather than growing an unbounded snapshot.
 
-use std::time::SystemTime;
-
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -108,6 +106,8 @@ pub struct HistorySeries {
     pub schema_version: u8,
     pub generated_at: String,
     pub window_seconds: u64,
+    pub persistent: bool,
+    pub stored_readings: u64,
     pub samples: Vec<HistorySample>,
 }
 
@@ -303,13 +303,12 @@ impl SnapshotSource for LiveMeterSource {
     }
 
     fn history(&self) -> Result<HistorySeries, &'static str> {
-        let now = SystemTime::now();
         let meter = self
             .meter
             .lock()
             .map_err(|_| "meter state is unavailable")?;
         let samples = meter
-            .recent_history(now)
+            .recent_history()
             .iter()
             .map(|entry| {
                 let reading = entry.data;
@@ -331,6 +330,8 @@ impl SnapshotSource for LiveMeterSource {
             schema_version: 1,
             generated_at: Utc::now().to_rfc3339(),
             window_seconds: HISTORY_WINDOW.as_secs(),
+            persistent: meter.history_is_persistent(),
+            stored_readings: meter.stored_readings(),
             samples,
         })
     }

@@ -108,7 +108,7 @@ export function createOverview({ onRename } = {}) {
     const rows = samples.map(sample => {
       const row = document.createElement('tr');
       const values = [
-        time.format(new Date(sample.at)),
+        new Date(sample.at).toLocaleString(),
         show(sample.total_power_watts, 1) + ' W',
         show(sample.voltage_v?.[0], 1) + ' V',
         show(sample.current_a?.[0], 2) + ' A',
@@ -133,12 +133,17 @@ export function createOverview({ onRename } = {}) {
 
     history(series) {
       history = series;
-      text('history-status', 'Live');
+      text('history-status', series.persistent ? `${integer.format(series.stored_readings)} saved` : 'Session only');
+      const latest = series.samples?.at(-1);
+      text('history-summary', latest
+        ? `Latest recorded window · Last measurement: ${new Date(latest.at).toLocaleString()}. ${series.persistent ? 'All accepted readings are kept in the archive.' : 'History is held in memory only.'}`
+        : 'No saved measurements yet. New readings will appear here.');
       renderRecentMeasurements(series);
     },
 
     historyError() {
       text('history-status', 'Unavailable');
+      text('history-summary', 'Saved history is currently unavailable. Retrying automatically.');
       const row = document.createElement('tr');
       const cell = document.createElement('td');
       cell.colSpan = 5;

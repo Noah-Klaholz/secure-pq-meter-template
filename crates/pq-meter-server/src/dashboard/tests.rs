@@ -547,3 +547,59 @@ fn saved_adaptive_identities_survive_restart_and_a_different_connection_order() 
     let change = meter.apply_reading(lab_reading(783.0, 230.0, 50.0), &mut restored);
     assert!(matches!(change, DeviceChange::Added(device) if device.id == "learned-3"));
 }
+
+#[tokio::test]
+async fn history_survives_long_downtime_without_replaying_live_state() {
+    use crate::{history::History, history_store::HistoryStore, labels::DeviceLabels};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("history.jsonl");
+    let (mut archive, _) = HistoryStore::open(&path, &mut History::bounded(600)).unwrap();
+    let at = chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    archive
+        .append(&[lab_reading(123.0, 230.0, 49.99)], at)
+        .unwrap();
+    drop(archive);
+    let source = Arc::new(LiveMeterSource {
+        meter: Arc::new(Mutex::new(
+            MeterState::with_labels(DUMMY_DEVICE_CATALOG.to_vec(), DeviceLabels::default())
+                .with_history_file(&path)
+                .unwrap(),
+        )),
+        decision_method: "immediate",
+    });
+    let response = router(source.clone())
+        .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+    assert_eq!(value["persistent"], true);
+    assert_eq!(value["stored_readings"], 1);
+    assert_eq!(value["samples"][0]["at"], "2025-01-02T03:04:05+00:00");
+    assert_eq!(value["samples"][0]["total_power_watts"], 123.0);
+    assert_eq!(value["samples"][0]["frequency_hz"], 49.99);
+    assert_eq!(
+        value["samples"][0]["thd_current_pct"][2],
+        serde_json::Value::Null
+    );
+    let live = source.snapshot().unwrap();
+    assert_eq!(live.readings_received, 0);
+    assert_eq!(live.total_power_watts, None);
+    assert_eq!(live.transport.state, "waiting");
+    assert!(live.devices.iter().all(|device| !device.active));
+
+    // New session readings replace the old displayed window, but do not erase its archive.
+    source
+        .meter
+        .lock()
+        .unwrap()
+        .apply_reading(200.0.into(), &mut ClosestPowerMatch::new(3.0));
+    let series = source.history().unwrap();
+    assert_eq!(series.stored_readings, 2);
+    assert_eq!(series.samples.len(), 1);
+    assert_eq!(series.samples[0].total_power_watts, 200.0);
+    assert!(source.snapshot().unwrap().last_change.is_none());
+}
