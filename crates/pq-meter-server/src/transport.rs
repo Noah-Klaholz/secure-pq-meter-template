@@ -20,6 +20,10 @@ pub const HEADER_QUEUED: &str = "x-pq-queued-readings";
 pub const HEADER_ACK_LATENCY: &str = "x-pq-ack-latency-ms";
 /// How often the gateway has changed path since it started.
 pub const HEADER_FAILOVERS: &str = "x-pq-failover-count";
+/// Readings the gateway gave up on: shed from a full queue, or refused by this receiver.
+pub const HEADER_DROPPED: &str = "x-pq-dropped-readings";
+/// How often the gateway had to re-establish its Modbus connection to the meter.
+pub const HEADER_RECONNECTS: &str = "x-pq-modbus-reconnects";
 
 /// Longest path string that is kept. A SCION path over a handful of ASes is far shorter;
 /// the cap stops a peer from pushing an unbounded string into the dashboard's state.
@@ -36,6 +40,15 @@ pub struct GatewayTransport {
     pub last_ack_latency_ms: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failover_count: Option<u32>,
+    /// Readings the gateway admits it lost. A non-zero value here is the one honest signal
+    /// that the archive has a hole in it; without it a gap is indistinguishable from an
+    /// installation that had nothing to report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped_readings: Option<u64>,
+    /// How often the gateway lost and regained the meter, which is a gap in acquisition
+    /// rather than in delivery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modbus_reconnects: Option<u64>,
 }
 
 impl GatewayTransport {
@@ -60,6 +73,8 @@ impl GatewayTransport {
             last_ack_latency_ms: parse_header::<f32>(headers, HEADER_ACK_LATENCY)
                 .filter(|value| value.is_finite() && *value >= 0.0),
             failover_count: parse_header(headers, HEADER_FAILOVERS),
+            dropped_readings: parse_header(headers, HEADER_DROPPED),
+            modbus_reconnects: parse_header(headers, HEADER_RECONNECTS),
         }
     }
 }
@@ -106,6 +121,8 @@ mod tests {
             (HEADER_QUEUED, "7"),
             (HEADER_ACK_LATENCY, "12.5"),
             (HEADER_FAILOVERS, "2"),
+            (HEADER_DROPPED, "13"),
+            (HEADER_RECONNECTS, "4"),
         ]));
 
         assert_eq!(
@@ -115,6 +132,8 @@ mod tests {
                 queued_readings: Some(7),
                 last_ack_latency_ms: Some(12.5),
                 failover_count: Some(2),
+                dropped_readings: Some(13),
+                modbus_reconnects: Some(4),
             }
         );
         assert!(!reported.is_empty());
@@ -138,6 +157,7 @@ mod tests {
             (HEADER_QUEUED, "not a number"),
             (HEADER_ACK_LATENCY, "NaN"),
             (HEADER_FAILOVERS, "-1"),
+            (HEADER_DROPPED, "3.5"),
         ]));
 
         assert_eq!(
@@ -147,6 +167,39 @@ mod tests {
         assert_eq!(reported.queued_readings, None);
         assert_eq!(reported.last_ack_latency_ms, None, "NaN is not a latency");
         assert_eq!(reported.failover_count, None, "a count cannot be negative");
+        assert_eq!(reported.dropped_readings, None, "a count is not fractional");
+    }
+
+    /// A gateway built before these headers existed reports the fields it knows and nothing
+    /// else, and must not have zeros invented for the rest.
+    #[test]
+    fn an_older_gateway_reporting_only_the_original_fields_still_works() {
+        let reported = GatewayTransport::from_headers(&headers(&[
+            (HEADER_PATH, "1-ff00:0:132 1>3 2-ff00:0:212"),
+            (HEADER_QUEUED, "7"),
+        ]));
+
+        assert_eq!(reported.queued_readings, Some(7));
+        assert_eq!(reported.dropped_readings, None);
+        assert_eq!(reported.modbus_reconnects, None);
+        assert!(!reported.is_empty());
+
+        let serialized = serde_json::to_value(&reported).unwrap();
+        assert!(serialized.get("dropped_readings").is_none());
+        assert!(serialized.get("modbus_reconnects").is_none());
+    }
+
+    /// A gateway that has lost nothing must say so, rather than stay silent: zero dropped is
+    /// a claim the dashboard should be able to show.
+    #[test]
+    fn a_reported_zero_is_kept_and_is_not_an_absence() {
+        let reported = GatewayTransport::from_headers(&headers(&[
+            (HEADER_DROPPED, "0"),
+            (HEADER_RECONNECTS, "0"),
+        ]));
+        assert_eq!(reported.dropped_readings, Some(0));
+        assert_eq!(reported.modbus_reconnects, Some(0));
+        assert!(!reported.is_empty());
     }
 
     #[test]

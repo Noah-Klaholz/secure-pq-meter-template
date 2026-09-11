@@ -15,21 +15,33 @@
 //! * `--server`: the SCION address of the HTTP/3 server, also printed by the server.
 
 mod link;
+mod meter;
+mod retry;
+mod spool;
+mod uplink;
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Parser;
-use scion_http3::{Client, Config, Request, scion_quic::quic::config::QuicConfig};
+use scion_http3::{Client, Request};
 use sciparse::address::ip_socket_addr::ScionSocketIpAddr;
+use tokio::sync::Notify;
 use tokio_modbus::Slave;
-use umg605_modbus_client::{DEFAULT_MODBUS_PORT, PHASE_COUNT, Phases, Snapshot, Umg605ProClient};
+use umg605_modbus_client::{DEFAULT_MODBUS_PORT, PHASE_COUNT, Phases, Snapshot};
 use url::Url;
 
 use crate::link::{
-    DeliveryStats, HEADER_ACK_LATENCY, HEADER_FAILOVERS, HEADER_PATH, HEADER_QUEUED, ScionLink,
+    DeliveryStats, HEADER_ACK_LATENCY, HEADER_DROPPED, HEADER_FAILOVERS, HEADER_PATH,
+    HEADER_QUEUED, HEADER_RECONNECTS, ScionLink,
 };
+use crate::meter::MeterConnection;
+use crate::retry::Backoff;
+use crate::spool::Spool;
+use crate::uplink::Uplink;
 
 /// SCION AS of the server.
 const SERVER_AS: &str = "2-ff00:0:212";
@@ -48,11 +60,24 @@ const DEFAULT_TIMEOUT_SECS: u64 = 5;
 /// Default interval in milliseconds at which meter values are read.
 const DEFAULT_METER_INTERVAL_MS: u64 = 200;
 
+/// Default number of unacknowledged readings the gateway holds before shedding the oldest.
+const DEFAULT_QUEUE_CAPACITY: usize = 5000;
+
+/// Default time in milliseconds to wait for a batch to be acknowledged.
+const DEFAULT_SEND_TIMEOUT_MS: u64 = 5000;
+
 /// TLS name the server's certificate is issued for.
 const SERVER_NAME: &str = "pq-meter-server";
 
 /// Largest response body we read. The answer of the server is a few bytes.
 const MAX_BODY_SIZE: usize = 4096;
+
+/// Shortest and longest wait between attempts to deliver a batch.
+///
+/// The ceiling is what a long outage settles at: the gateway keeps acquiring throughout and
+/// tries again every half minute, rather than hammering a receiver that is plainly not there.
+const SEND_RETRY_BASE: Duration = Duration::from_millis(500);
+const SEND_RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// Command line arguments.
 #[derive(Debug, Parser)]
@@ -119,6 +144,22 @@ struct Args {
     /// installation. Set to 0 to record only threshold crossings.
     #[arg(long, visible_alias = "heartbeat", default_value_t = 2000)]
     heartbeat_ms: u64,
+
+    /// How many unacknowledged readings the gateway holds before it starts losing them.
+    ///
+    /// This is how long an outage the gateway can absorb. At the default read interval and
+    /// heartbeat that is roughly an hour of an idle installation. When it is full the
+    /// *oldest* reading is discarded, so the dashboard keeps showing the present and the gap
+    /// lands in the archive instead.
+    #[arg(long, visible_alias = "queue-size", default_value_t = DEFAULT_QUEUE_CAPACITY)]
+    queue_capacity: usize,
+
+    /// How long in milliseconds to wait for the receiver to acknowledge a batch.
+    ///
+    /// A request that never answers must not pin the uploader, or the queue stops draining
+    /// while the gateway waits on a link that is already gone.
+    #[arg(long, visible_alias = "send-timeout", default_value_t = DEFAULT_SEND_TIMEOUT_MS)]
+    send_timeout_ms: u64,
 }
 
 #[tokio::main]
@@ -164,21 +205,9 @@ async fn main() -> anyhow::Result<()> {
 
     let endhost_api_for_paths = endhost_api.clone();
 
-    // One client per program: it holds the connection pool. Building it does no I/O, the
-    // connection is established with the first request.
-    let client = Client::new(
-        Config::new(endhost_api)
-            // TODO(security): development credential, not a real one. A gateway should ask
-            // the AA (the authentication and authorization service) for a SNAP token that
-            // identifies *this* device, so the network can refuse an unknown one before its
-            // packets reach the application. The dummy token identifies nobody.
-            .with_auth_token(snap_tokens::v0::dummy_snap_token())
-            // TODO(security): the connection is encrypted but the peer is unauthenticated.
-            // `verify_peer(false)` accepts any certificate, so anything that can answer on
-            // the address can impersonate the receiver and collect the meter data. Pin the
-            // backend certificate, or verify against a CA the gateway is provisioned with.
-            .with_quic_config(QuicConfig::builder().verify_peer(false).build()),
-    );
+    // The connection pool of one client, held so that it can be replaced: a pool that has
+    // outlived the receiver it points at never recovers on its own. See `uplink.rs`.
+    let uplink = Uplink::new(endhost_api);
 
     // A second, read-only view of the network, used only to report which path is in use.
     // The gateway's job is delivering readings, so failing to attach is a warning, not an
@@ -186,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
     let server_as: sciparse::identifier::isd_asn::IsdAsn = SERVER_AS
         .parse()
         .context("parsing the SCION AS of the server")?;
-    let mut scion_link = match ScionLink::attach(endhost_api_for_paths, server_as).await {
+    let scion_link = match ScionLink::attach(endhost_api_for_paths, server_as).await {
         Ok(link) => Some(link),
         Err(error) => {
             eprintln!("Warning: cannot report the SCION path in use: {error}");
@@ -194,36 +223,63 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let meter_socket_addr = SocketAddr::new(args.meter_ip, args.meter_port);
-    let meter_timeout = Duration::from_secs(args.meter_timeout);
-    let mut meter_client =
-        Umg605ProClient::connect_tcp(meter_socket_addr, Slave(args.meter_unit), meter_timeout)
-            .await?;
+    // Connecting is deferred to the first read, so an unreachable meter is something the
+    // gateway waits out rather than something that stops it from starting.
+    let meter = MeterConnection::new(
+        SocketAddr::new(args.meter_ip, args.meter_port),
+        Slave(args.meter_unit),
+        Duration::from_secs(args.meter_timeout),
+    );
 
     let meter_interval = Duration::from_millis(args.meter_interval_ms.max(1));
     let batch_size = args.batch_size.max(1);
     let batch_timeout = Duration::from_millis(args.batch_timeout_ms.max(1));
+    let send_timeout = Duration::from_millis(args.send_timeout_ms.max(1));
     let heartbeat = (args.heartbeat_ms > 0).then(|| Duration::from_millis(args.heartbeat_ms));
+    let queue_capacity = args.queue_capacity.max(batch_size);
 
     println!(
-        "streaming meter data to {server_scion}{} (interval: {meter_interval:.2?}, batch size: {batch_size}, timeout: {batch_timeout:.2?}) ...",
+        "streaming meter data to {server_scion}{} (interval: {meter_interval:.2?}, batch size: {batch_size}, timeout: {batch_timeout:.2?}, queue: {queue_capacity}) ...",
         args.path
     );
 
-    monitor(
-        &mut meter_client,
-        &client,
-        &server_scion,
-        &args.path,
+    // Acquisition and upload are separate tasks sharing one queue. They have to be: a read
+    // happens on a fixed cadence the meter dictates, a send takes as long as the network
+    // takes, and running them in one loop means a slow send silently skips readings.
+    let spool = Arc::new(Mutex::new(Spool::new(queue_capacity)));
+    let queued = Arc::new(Notify::new());
+    let reconnects = Arc::new(AtomicU64::new(0));
+
+    let acquisition = tokio::spawn(acquire(
+        meter,
         meter_interval,
+        heartbeat,
+        Arc::clone(&spool),
+        Arc::clone(&queued),
+        Arc::clone(&reconnects),
+    ));
+
+    let url = format!("https://{SERVER_NAME}:{}{}", server_scion.port(), args.path);
+    let upload = tokio::spawn(upload(
+        uplink,
+        url,
+        server_scion,
         batch_size,
         batch_timeout,
-        heartbeat,
-        &mut scion_link,
-    )
-    .await?;
+        send_timeout,
+        scion_link,
+        spool,
+        queued,
+        reconnects,
+    ));
 
-    client.close().await;
+    // Neither task returns on its own, so reaching here means one of them panicked. Losing
+    // either half leaves a gateway that looks alive and delivers nothing, so stop outright
+    // rather than carry on with the other.
+    tokio::select! {
+        result = acquisition => result.context("the acquisition task stopped")?,
+        result = upload => result.context("the upload task stopped")?,
+    }
 
     Ok(())
 }
@@ -496,155 +552,267 @@ fn should_record(
     })
 }
 
-/// Reads the meter every `period` and pushes batched readings to the server over SCION
-/// when either the size trigger (`batch_size`) or time trigger (`batch_timeout`) fires.
+/// Reads the meter every `period` and queues the readings worth keeping.
 ///
-/// Readings are recorded and printed only when changes exceed the noise threshold
-/// and remain settled for `SETTLING_WINDOW`.
-#[allow(clippy::too_many_arguments)]
-async fn monitor(
-    meter: &mut Umg605ProClient,
-    http: &Client,
-    server: &ScionSocketIpAddr,
-    path: &str,
+/// Readings are recorded and printed only when changes exceed the noise threshold and remain
+/// settled for `SETTLING_WINDOW`, or when the heartbeat is due.
+///
+/// This never returns and never fails. A meter that stops answering is a gap in the data,
+/// not the end of the gateway: [`MeterConnection`] reconnects underneath, and the loop keeps
+/// its cadence so that delivery of everything already queued carries on regardless.
+async fn acquire(
+    mut meter: MeterConnection,
     period: Duration,
-    batch_size: usize,
-    batch_timeout: Duration,
     heartbeat: Option<Duration>,
-    scion_link: &mut Option<ScionLink>,
-) -> anyhow::Result<()> {
-    // The URL holds the server name and the port. `target` gives the SCION address the
-    // packets go to, so the simulated network needs no DNS.
-    let url = format!("https://{SERVER_NAME}:{}{}", server.port(), path);
-
+    spool: Arc<Mutex<Spool>>,
+    queued: Arc<Notify>,
+    reconnects: Arc<AtomicU64>,
+) {
     let mut interval = tokio::time::interval(period);
-    let mut batch: Vec<serde_json::Value> = Vec::with_capacity(batch_size);
-    let mut flush_deadline = tokio::time::Instant::now() + batch_timeout;
+    // A read that overruns must not be repaid with a burst of catch-up reads: the meter is
+    // slow, and asking it faster will not make it quicker.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut settled_monitor = SettledMonitor::new(SETTLING_WINDOW);
-    let mut delivery = DeliveryStats::default();
     let mut last_recorded: Option<Instant> = None;
 
     loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                let start = Instant::now();
+        interval.tick().await;
+        let start = Instant::now();
 
-                let snapshot = meter.snapshot().await?;
+        let Some(snapshot) = meter.snapshot().await else {
+            reconnects.store(meter.reconnects(), Ordering::Relaxed);
+            continue;
+        };
+        reconnects.store(meter.reconnects(), Ordering::Relaxed);
 
-                let read_elapsed = start.elapsed();
+        let read_elapsed = start.elapsed();
 
-                // The meter measures the three-phase sum itself. It is signed: a grid
-                // connection that exports more than it draws reports negative real power.
-                match measured(snapshot.real_power_sum3) {
-                    None => eprintln!(
-                        "Warning: the meter reported no three-phase real power, skipping this reading"
-                    ),
-                    Some(total_power) => {
-                        let current_reading = BaselineReading::from_snapshot(&snapshot);
+        // The meter measures the three-phase sum itself. It is signed: a grid connection
+        // that exports more than it draws reports negative real power.
+        let Some(total_power) = measured(snapshot.real_power_sum3) else {
+            eprintln!(
+                "Warning: the meter reported no three-phase real power, skipping this reading"
+            );
+            continue;
+        };
 
-                        let changed = settled_monitor.process_reading(current_reading, start);
-                        if should_record(changed, heartbeat, last_recorded, start) {
-                            last_recorded = Some(start);
-                            if batch.is_empty() {
-                                flush_deadline = tokio::time::Instant::now() + batch_timeout;
-                            }
-                            batch.push(measurement_json(&snapshot, total_power, !changed));
+        let current_reading = BaselineReading::from_snapshot(&snapshot);
+        let changed = settled_monitor.process_reading(current_reading, start);
+        if should_record(changed, heartbeat, last_recorded, start) {
+            last_recorded = Some(start);
 
-                            println!(
-                                "{} | Batch: {}/{}{}",
-                                summary(&snapshot),
-                                batch.len(),
-                                batch_size,
-                                if changed { "" } else { " (heartbeat)" }
-                            );
-                        }
-                    }
-                }
+            let depth = {
+                let mut spool = lock(&spool);
+                spool.push(measurement_json(&snapshot, total_power, !changed));
+                spool.depth()
+            };
+            queued.notify_one();
 
-                if read_elapsed > period {
-                    eprintln!(
-                        "Warning: Reading took longer than the {:.2?} interval: {:.2?}",
-                        period, read_elapsed
-                    );
-                }
+            println!(
+                "{} | Queued: {}{}",
+                summary(&snapshot),
+                depth,
+                if changed { "" } else { " (heartbeat)" }
+            );
+        }
 
-                let should_flush_size = batch.len() >= batch_size;
-                let should_flush_time =
-                    !batch.is_empty() && tokio::time::Instant::now() >= flush_deadline;
+        if read_elapsed > period {
+            eprintln!(
+                "Warning: Reading took longer than the {:.2?} interval: {:.2?}",
+                period, read_elapsed
+            );
+        }
+    }
+}
 
-                if should_flush_size || should_flush_time {
-                    let reason = if should_flush_size { "size trigger" } else { "time trigger" };
-                    if let Some(link) = scion_link.as_mut() {
-                        link.refresh().await;
-                    }
-                    send_batch(
-                        http,
-                        &url,
-                        server,
-                        &mut batch,
-                        reason,
-                        scion_link.as_ref(),
-                        &mut delivery,
-                    )
-                    .await;
-                    flush_deadline = tokio::time::Instant::now() + batch_timeout;
-                }
+/// Delivers queued readings to the server, and removes them only once it has been told they
+/// arrived.
+///
+/// This never returns. Every failure mode here is temporary by assumption — the point of the
+/// gateway is to outlive them — so the loop backs off and tries the same readings again
+/// rather than giving up on them.
+#[allow(clippy::too_many_arguments)]
+async fn upload(
+    mut uplink: Uplink,
+    url: String,
+    server: ScionSocketIpAddr,
+    batch_size: usize,
+    batch_timeout: Duration,
+    send_timeout: Duration,
+    mut scion_link: Option<ScionLink>,
+    spool: Arc<Mutex<Spool>>,
+    queued: Arc<Notify>,
+    reconnects: Arc<AtomicU64>,
+) {
+    let mut delivery = DeliveryStats::default();
+    let mut backoff = Backoff::new(SEND_RETRY_BASE, SEND_RETRY_MAX);
+    let mut retry_at: Option<tokio::time::Instant> = None;
+    let mut flush_deadline = tokio::time::Instant::now() + batch_timeout;
+
+    loop {
+        // A batch that failed is tried again, unchanged, once the backoff has run out.
+        if let Some(at) = retry_at {
+            if tokio::time::Instant::now() < at {
+                tokio::time::sleep_until(at).await;
             }
-            _ = tokio::time::sleep_until(flush_deadline), if !batch.is_empty() => {
-                if let Some(link) = scion_link.as_mut() {
-                    link.refresh().await;
-                }
-                send_batch(
-                    http,
-                    &url,
-                    server,
-                    &mut batch,
-                    "time trigger",
-                    scion_link.as_ref(),
-                    &mut delivery,
-                )
-                .await;
-                flush_deadline = tokio::time::Instant::now() + batch_timeout;
+            retry_at = None;
+        }
+
+        let depth = lock(&spool).depth();
+
+        if depth == 0 {
+            queued.notified().await;
+            // The time trigger measures how long the oldest reading has waited, so it starts
+            // when a reading arrives in an empty queue.
+            flush_deadline = tokio::time::Instant::now() + batch_timeout;
+            continue;
+        }
+
+        let size_trigger = depth >= batch_size;
+        let now = tokio::time::Instant::now();
+        if !size_trigger && now < flush_deadline {
+            tokio::select! {
+                _ = queued.notified() => {}
+                _ = tokio::time::sleep_until(flush_deadline) => {}
+            }
+            continue;
+        }
+        let reason = if size_trigger {
+            "size trigger"
+        } else {
+            "time trigger"
+        };
+
+        if let Some(link) = scion_link.as_mut() {
+            link.refresh().await;
+        }
+
+        // The readings stay queued while the batch is in flight. Nothing is removed until
+        // the receiver says it has them.
+        let lease = lock(&spool).peek(batch_size);
+        if lease.is_empty() {
+            continue;
+        }
+
+        delivery.queued_readings = depth;
+        let stats = lock(&spool).stats();
+        delivery.dropped_readings = stats.dropped_total();
+        delivery.modbus_reconnects = reconnects.load(Ordering::Relaxed);
+
+        let outcome = send_batch(
+            uplink.client(),
+            &url,
+            &server,
+            &lease.readings,
+            reason,
+            scion_link.as_ref(),
+            &mut delivery,
+            send_timeout,
+        )
+        .await;
+
+        match outcome {
+            Delivery::Accepted => {
+                uplink.note_reachable();
+                lock(&spool).commit(&lease);
+                backoff.reset();
+            }
+            Delivery::Rejected => {
+                // Refused on its content, which means it got there: the connection works.
+                uplink.note_reachable();
+                // The receiver validates a batch as a whole and refuses all of it if any one
+                // reading is malformed, so this batch will be refused every time it is sent.
+                // Retrying it forever would block every reading behind it.
+                eprintln!(
+                    "Error: the receiver refused {} reading(s); discarding them to keep the queue moving",
+                    lease.len()
+                );
+                lock(&spool).reject(&lease);
+                backoff.reset();
+            }
+            Delivery::Failed => {
+                // Nothing came back. If this keeps happening the pool itself is stale, and
+                // no amount of waiting will revive it.
+                uplink.note_unreachable().await;
+                let delay = backoff.next_delay();
+                eprintln!(
+                    "Warning: {} reading(s) are still queued, retrying in {delay:.2?}",
+                    lock(&spool).depth()
+                );
+                retry_at = Some(tokio::time::Instant::now() + delay);
+                continue;
             }
         }
+
+        flush_deadline = tokio::time::Instant::now() + batch_timeout;
+    }
+}
+
+/// What became of a batch the gateway tried to deliver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delivery {
+    /// The receiver has the readings. They can be removed from the queue.
+    Accepted,
+    /// The receiver refused the readings and always will. Keeping them blocks the queue.
+    Rejected,
+    /// Nobody answered, or the receiver could not take them right now. Try again later.
+    Failed,
+}
+
+/// Classifies what the receiver said about a batch.
+fn classify(status: scion_http3::http::StatusCode) -> Delivery {
+    if status.is_success() {
+        Delivery::Accepted
+    } else if status.is_client_error() {
+        // 400 means the batch is malformed and resending it changes nothing.
+        Delivery::Rejected
+    } else {
+        // 503 is the receiver failing to persist the batch, which is worth retrying.
+        Delivery::Failed
     }
 }
 
 /// Sends buffered measurements to the server over SCION HTTP/3.
 ///
+/// The batch is borrowed, never drained: whether these readings may be forgotten is the
+/// caller's decision to make from the returned [`Delivery`], and it can only make it once
+/// the receiver has answered.
+///
 /// The gateway's view of the link rides along as headers: which path it is using, how many
-/// readings were waiting, how long the previous acknowledgement took, and how often the
-/// path has changed. That keeps the measurement body exactly as the receiver documents it.
+/// readings are waiting, how long the previous acknowledgement took, how often the path has
+/// changed, and what it has lost. That keeps the measurement body exactly as the receiver
+/// documents it.
+#[allow(clippy::too_many_arguments)]
 async fn send_batch(
     http: &Client,
     url: &str,
     server: &ScionSocketIpAddr,
-    batch: &mut Vec<serde_json::Value>,
+    batch: &[serde_json::Value],
     reason: &str,
     link: Option<&ScionLink>,
     delivery: &mut DeliveryStats,
-) {
+    send_timeout: Duration,
+) -> Delivery {
     if batch.is_empty() {
-        return;
+        return Delivery::Accepted;
     }
 
     let count = batch.len();
     let body = match serde_json::to_vec(batch) {
-        Ok(b) => b,
+        Ok(body) => body,
         Err(err) => {
+            // A reading that will not serialize will not serialize on the next attempt
+            // either, so this batch is poison rather than delayed.
             eprintln!("Warning: encoding the measurement batch failed: {err}");
-            batch.clear();
-            return;
+            return Delivery::Rejected;
         }
     };
-    batch.clear();
-
-    // These readings are in flight until the server answers.
-    delivery.queued_readings = count;
 
     let mut builder = Request::post(url)
         .header("content-type", "application/json")
-        .header(HEADER_QUEUED, delivery.queued_readings.to_string());
+        .header(HEADER_QUEUED, delivery.queued_readings.to_string())
+        .header(HEADER_DROPPED, delivery.dropped_readings.to_string())
+        .header(HEADER_RECONNECTS, delivery.modbus_reconnects.to_string());
     if let Some(latency) = delivery.last_ack_latency_ms {
         builder = builder.header(HEADER_ACK_LATENCY, format!("{latency:.1}"));
     }
@@ -656,47 +824,66 @@ async fn send_batch(
     }
 
     let request = match builder.target(server.host()).body(body).build() {
-        Ok(req) => req,
+        Ok(request) => request,
         Err(err) => {
             eprintln!("Warning: building the batch request failed: {err}");
-            return;
+            return Delivery::Rejected;
         }
     };
 
     let send_start = Instant::now();
-    match http.request(request).await {
-        Ok(response) => {
-            let status = response.status();
-            let elapsed = send_start.elapsed();
-            // Acknowledged: nothing is waiting here any more, and the next batch can say
-            // how long this one took.
-            delivery.queued_readings = 0;
-            delivery.last_ack_latency_ms = Some(elapsed.as_secs_f32() * 1000.0);
-            if !status.is_success() {
-                eprintln!("Warning: server answered with {status} ({elapsed:.2?})");
-            }
-            match response.text(Some(MAX_BODY_SIZE)).await {
-                Ok((text, _)) => {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        println!(
-                            "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}: {trimmed}"
-                        );
-                    } else {
-                        println!(
-                            "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}"
-                        );
-                    }
-                }
-                Err(_) => {
-                    println!(
-                        "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}"
-                    );
-                }
+    let response = match tokio::time::timeout(send_timeout, http.request(request)).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            eprintln!("Warning: sending the batch failed: {error}");
+            return Delivery::Failed;
+        }
+        Err(_) => {
+            eprintln!("Warning: the receiver did not answer within {send_timeout:.2?}");
+            return Delivery::Failed;
+        }
+    };
+
+    let status = response.status();
+    let elapsed = send_start.elapsed();
+    let outcome = classify(status);
+
+    if outcome == Delivery::Accepted {
+        // Only a round trip that completed says anything about how long the link takes. The
+        // backlog itself is read from the spool on the next pass, so it is never guessed at
+        // here: whether these readings have left the queue is the caller's decision.
+        delivery.last_ack_latency_ms = Some(elapsed.as_secs_f32() * 1000.0);
+    } else {
+        eprintln!("Warning: server answered with {status} ({elapsed:.2?})");
+    }
+
+    let answer = match response.text(Some(MAX_BODY_SIZE)).await {
+        Ok((text, _)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                String::new()
+            } else {
+                format!(": {trimmed}")
             }
         }
-        Err(error) => eprintln!("Warning: sending the batch failed: {error}"),
-    }
+        Err(_) => String::new(),
+    };
+    println!(
+        "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}{answer}"
+    );
+
+    outcome
+}
+
+/// Takes the spool lock, treating a poisoned lock as fatal.
+///
+/// The lock is only ever held for a push or a drain, never across an await, so it can only
+/// be poisoned by a panic in one of those — which means the queue is in an unknown state and
+/// there is nothing sensible to carry on with.
+fn lock(spool: &Mutex<Spool>) -> std::sync::MutexGuard<'_, Spool> {
+    spool
+        .lock()
+        .expect("the spool lock was poisoned by a panic")
 }
 
 #[cfg(test)]
@@ -716,6 +903,243 @@ mod tests {
         assert_eq!(args.meter_interval_ms, DEFAULT_METER_INTERVAL_MS);
         assert_eq!(args.batch_size, 10);
         assert_eq!(args.batch_timeout_ms, 1000);
+        assert_eq!(args.queue_capacity, DEFAULT_QUEUE_CAPACITY);
+        assert_eq!(args.send_timeout_ms, DEFAULT_SEND_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn parses_the_delivery_flags_and_their_aliases() {
+        let args = Args::try_parse_from([
+            "pq-meter-client",
+            "10.0.0.1",
+            "--queue-size",
+            "250",
+            "--send-timeout",
+            "1500",
+        ])
+        .unwrap();
+        assert_eq!(args.queue_capacity, 250);
+        assert_eq!(args.send_timeout_ms, 1500);
+    }
+
+    /// A queue smaller than a batch could never fill one, so the batch size is the floor.
+    #[test]
+    fn the_queue_never_holds_less_than_one_batch() {
+        let args =
+            Args::try_parse_from(["pq-meter-client", "10.0.0.1", "--queue-size", "1"]).unwrap();
+        assert_eq!(args.queue_capacity.max(args.batch_size), args.batch_size);
+    }
+
+    /// The bug this replaced discarded a batch the moment it was handed to the network, so
+    /// the classification of a response is what decides whether readings may be forgotten.
+    #[test]
+    fn only_an_acknowledgement_allows_readings_to_be_forgotten() {
+        use scion_http3::http::StatusCode;
+
+        assert_eq!(classify(StatusCode::OK), Delivery::Accepted);
+        assert_eq!(classify(StatusCode::NO_CONTENT), Delivery::Accepted);
+
+        // A malformed batch is refused identically every time, so holding on to it would
+        // block every reading behind it forever.
+        assert_eq!(classify(StatusCode::BAD_REQUEST), Delivery::Rejected);
+
+        // The receiver failing to persist a batch is temporary, and the readings are still
+        // good: these must be kept and sent again.
+        assert_eq!(classify(StatusCode::SERVICE_UNAVAILABLE), Delivery::Failed);
+        assert_eq!(
+            classify(StatusCode::INTERNAL_SERVER_ERROR),
+            Delivery::Failed
+        );
+    }
+
+    /// A Modbus TCP server that answers every holding-register read with zeros, and that can
+    /// be made to drop connections on demand to imitate a meter going away.
+    ///
+    /// Zeros are enough: the gateway only needs a finite three-phase sum to accept a reading,
+    /// and an unchanging meter exercises the heartbeat path rather than the threshold one.
+    mod mock_meter {
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        pub struct MockMeter {
+            pub address: SocketAddr,
+            healthy: Arc<AtomicBool>,
+        }
+
+        impl MockMeter {
+            pub async fn spawn() -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let healthy = Arc::new(AtomicBool::new(true));
+
+                let serving = Arc::clone(&healthy);
+                tokio::spawn(async move {
+                    while let Ok((mut stream, _)) = listener.accept().await {
+                        let serving = Arc::clone(&serving);
+                        tokio::spawn(async move {
+                            let mut header = [0u8; 12];
+                            while stream.read_exact(&mut header).await.is_ok() {
+                                if !serving.load(Ordering::SeqCst) {
+                                    // The meter has gone: hang up mid-transaction, which is
+                                    // what the gateway sees when the link or the meter drops.
+                                    return;
+                                }
+                                let count = u16::from_be_bytes([header[10], header[11]]);
+                                let bytes = 2 * count as usize;
+                                let length = (bytes + 3) as u16;
+                                let mut response = Vec::with_capacity(bytes + 9);
+                                response.extend_from_slice(&header[0..2]); // transaction id
+                                response.extend_from_slice(&[0, 0]); // protocol id
+                                response.extend_from_slice(&length.to_be_bytes());
+                                response.push(header[6]); // unit id
+                                response.push(3); // read holding registers
+                                response.push(bytes as u8);
+                                response.resize(response.len() + bytes, 0);
+                                if stream.write_all(&response).await.is_err() {
+                                    return;
+                                }
+                            }
+                        });
+                    }
+                });
+
+                Self { address, healthy }
+            }
+
+            pub fn fail(&self) {
+                self.healthy.store(false, Ordering::SeqCst);
+            }
+
+            pub fn recover(&self) {
+                self.healthy.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Waits for `condition`, giving up rather than hanging the suite.
+    async fn within(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        condition()
+    }
+
+    /// The defect this replaced: one failed Modbus read propagated out of the monitoring
+    /// loop and out of `main`, so a meter that blinked took the gateway down with it. It must
+    /// now be a gap in acquisition that the gateway recovers from on its own.
+    #[tokio::test]
+    async fn a_meter_that_fails_and_returns_does_not_stop_acquisition() {
+        let meter = mock_meter::MockMeter::spawn().await;
+        let spool = Arc::new(Mutex::new(Spool::new(1000)));
+        let queued = Arc::new(Notify::new());
+        let reconnects = Arc::new(AtomicU64::new(0));
+
+        let task = tokio::spawn(acquire(
+            MeterConnection::new(meter.address, Slave(1), Duration::from_millis(200)),
+            Duration::from_millis(10),
+            Some(Duration::from_millis(10)),
+            Arc::clone(&spool),
+            Arc::clone(&queued),
+            Arc::clone(&reconnects),
+        ));
+
+        assert!(
+            within(Duration::from_secs(5), || lock(&spool).depth() >= 3).await,
+            "the gateway never queued a reading from a healthy meter"
+        );
+
+        // The meter goes away, long enough for several reads to fail and back off.
+        meter.fail();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let during_outage = lock(&spool).depth();
+        assert!(
+            !task.is_finished(),
+            "a failed read must not end the acquisition loop"
+        );
+
+        // ... and comes back.
+        meter.recover();
+        assert!(
+            within(Duration::from_secs(5), || lock(&spool).depth()
+                > during_outage)
+            .await,
+            "the gateway did not resume reading after the meter returned"
+        );
+        assert!(
+            reconnects.load(Ordering::Relaxed) >= 1,
+            "a re-established connection should have been counted"
+        );
+        assert!(!task.is_finished(), "acquisition stopped");
+
+        task.abort();
+    }
+
+    /// A gateway whose receiver is unreachable must keep acquiring, shed the oldest readings
+    /// once it runs out of room, and say how many it lost. Nothing here drains the spool,
+    /// which is exactly the situation during a network outage.
+    #[tokio::test]
+    async fn an_outage_that_outlasts_the_queue_sheds_the_oldest_and_counts_the_loss() {
+        let meter = mock_meter::MockMeter::spawn().await;
+        let capacity = 8;
+        let spool = Arc::new(Mutex::new(Spool::new(capacity)));
+        let queued = Arc::new(Notify::new());
+
+        let task = tokio::spawn(acquire(
+            MeterConnection::new(meter.address, Slave(1), Duration::from_millis(200)),
+            Duration::from_millis(5),
+            Some(Duration::from_millis(5)),
+            Arc::clone(&spool),
+            queued,
+            Arc::new(AtomicU64::new(0)),
+        ));
+
+        assert!(
+            within(Duration::from_secs(5), || lock(&spool)
+                .stats()
+                .dropped_overflow
+                > 0)
+            .await,
+            "the queue never filled"
+        );
+
+        let spool = lock(&spool);
+        assert_eq!(spool.depth(), capacity, "the queue grew past its bound");
+        assert!(
+            spool.stats().dropped_overflow > 0,
+            "readings were lost without being counted"
+        );
+        assert_eq!(spool.stats().dropped_rejected, 0);
+
+        task.abort();
+    }
+
+    /// The contract between the two tasks: a lease survives a failed attempt untouched, and
+    /// is only removed once the receiver has answered for it.
+    #[test]
+    fn a_failed_delivery_leaves_every_reading_queued_for_the_next_attempt() {
+        let mut spool = Spool::new(100);
+        for index in 0..5 {
+            spool.push(json!({ "n": index }));
+        }
+
+        let lease = spool.peek(3);
+        // Delivery::Failed: the uploader does nothing to the spool at all.
+        assert_eq!(spool.depth(), 5);
+
+        // The retry sends the same readings, and this time they arrive.
+        let retried = spool.peek(3);
+        assert_eq!(retried.readings, lease.readings);
+        spool.commit(&retried);
+        assert_eq!(spool.depth(), 2);
+        assert_eq!(spool.stats().dropped_total(), 0);
     }
 
     #[test]

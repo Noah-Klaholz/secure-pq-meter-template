@@ -23,6 +23,8 @@ pub const HEADER_PATH: &str = "x-pq-scion-path";
 pub const HEADER_QUEUED: &str = "x-pq-queued-readings";
 pub const HEADER_ACK_LATENCY: &str = "x-pq-ack-latency-ms";
 pub const HEADER_FAILOVERS: &str = "x-pq-failover-count";
+pub const HEADER_DROPPED: &str = "x-pq-dropped-readings";
+pub const HEADER_RECONNECTS: &str = "x-pq-modbus-reconnects";
 
 /// How often the selected path is looked up again.
 ///
@@ -126,12 +128,23 @@ fn describe(path: &ScionPath) -> String {
 }
 
 /// What the gateway reports about itself with each batch.
+///
+/// These are counters, not estimates. `queued_readings` is the real depth of the spool at
+/// the moment the batch was built, including the readings in the batch itself, because they
+/// are not delivered until the receiver says so. A batch that fails leaves the depth where
+/// it was, and a batch the receiver refuses shows up in `dropped_readings`. The README notes
+/// that these figures are self-reported and therefore not evidence; that is a reason for
+/// them to be accurate, not a licence for them to be optimistic.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DeliveryStats {
     /// Readings buffered here and not yet acknowledged by the receiver.
     pub queued_readings: usize,
     /// Round trip of the previous batch. The current one cannot know its own yet.
     pub last_ack_latency_ms: Option<f32>,
+    /// Readings the gateway gave up on: evicted from a full spool, or refused outright.
+    pub dropped_readings: u64,
+    /// How often the connection to the meter had to be re-established.
+    pub modbus_reconnects: u64,
 }
 
 #[cfg(test)]
@@ -143,5 +156,7 @@ mod tests {
         let stats = DeliveryStats::default();
         assert_eq!(stats.queued_readings, 0);
         assert_eq!(stats.last_ack_latency_ms, None);
+        assert_eq!(stats.dropped_readings, 0);
+        assert_eq!(stats.modbus_reconnects, 0);
     }
 }

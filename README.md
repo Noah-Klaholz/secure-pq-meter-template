@@ -33,9 +33,9 @@ What is stubbed, and what a deployment would need instead:
 
 | Shortcut | Where | What it should be |
 | --- | --- | --- |
-| Dummy SNAP token on the gateway | `pq-meter-client/src/main.rs`, `link.rs` | A token issued to *this* gateway by the AA (authentication and authorization service), so the network refuses an unknown device before its packets reach the application |
+| Dummy SNAP token on the gateway | `pq-meter-client/src/uplink.rs`, `link.rs` | A token issued to *this* gateway by the AA (authentication and authorization service), so the network refuses an unknown device before its packets reach the application |
 | PocketSCION development token on the receiver | `pq-meter-server/src/main.rs` | A credential issued to the receiver |
-| Gateway does not verify the receiver (`verify_peer(false)`) | `pq-meter-client/src/main.rs` | Pin the backend certificate, or verify against a CA the gateway is provisioned with. The connection is encrypted, but the gateway does not know who is on the other end |
+| Gateway does not verify the receiver (`verify_peer(false)`) | `pq-meter-client/src/uplink.rs` | Pin the backend certificate, or verify against a CA the gateway is provisioned with. The connection is encrypted, but the gateway does not know who is on the other end |
 | Self-signed certificate regenerated on every start | `pq-meter-server/src/api.rs` | A stable certificate the gateway can pin — regenerating it is what forces the gateway to skip verification in the first place |
 | Ingest endpoint is unauthenticated | `pq-meter-server/src/api.rs` | Anything that can reach the SNAP can post readings, and nothing ties a batch to the meter it claims to come from. Reject unauthorized gateways at the network layer, and give the reading an identity the receiver checks |
 | Dashboard has no authentication | `pq-meter-server/src/dashboard/mod.rs` | Bound to `127.0.0.1`, so being on the machine is the only thing protecting it. Exposing it needs authentication and TLS |
@@ -44,9 +44,10 @@ What is stubbed, and what a deployment would need instead:
 Two further properties are by design rather than shortcuts, but are worth knowing:
 
 - The **transport figures the dashboard shows** — path in use, queued readings, latency,
-  failover count — are *reported by the gateway about itself*, because the receiver cannot
-  observe them. They are not evidence. The one thing the receiver does not take on trust is
-  the link state, which it judges from when a batch actually arrived.
+  failover count, meter reconnects, readings lost — are *reported by the gateway about
+  itself*, because the receiver cannot observe them. They are not evidence. The one thing the
+  receiver does not take on trust is the link state, which it judges from when a batch
+  actually arrived.
 - The **device catalog is a demonstration**, and device inference is a guess from changes in
   power. It is not metering-grade, and nothing billable should be derived from it.
 
@@ -62,7 +63,11 @@ crates/
     src/meter.rs           Shared current state, independent of either HTTP transport
     src/dashboard/         Local dashboard, versioned read API, and embedded UI assets
   pq-meter-client/         Runs on the gateway
-    src/main.rs            Reads the meter and sends batches of measurements
+    src/main.rs            Command line interface; the acquisition and upload tasks
+    src/meter.rs           The Modbus connection, and how it re-establishes itself
+    src/spool.rs           The bounded queue of readings awaiting acknowledgement
+    src/uplink.rs          The HTTP/3 connection, and when to rebuild it
+    src/retry.rs           Jittered exponential backoff, shared by both of the above
   umg605-modbus-client/    Reads data from a UMG 605-PRO power quality meter over Modbus TCP
     src/lib.rs             The Modbus TCP client and the registers it reads
     bin/pinger.rs          Example binary that reads values from the meter
@@ -141,11 +146,14 @@ cargo run -p pq-meter-client -- \
   --server '[2-ff00:0:212,127.0.0.1]:59218'
 ```
 
-The client needs a reachable Modbus meter (default `10.10.0.2:502`; override with
-`--meter-ip` and `--meter-port`). It continuously reads measurements every 200 ms and
-sends a JSON array when either `--batch-size` (default 10) or `--batch-timeout-ms`
-(default 1000 ms) is reached. The server acknowledges accepted batches and updates its
-meter and device state. See [Measurement ingestion](#measurement-ingestion) for the payload.
+The client reads a Modbus meter (default `10.10.0.2:502`; override with `--meter-ip` and
+`--meter-port`) every 200 ms and sends a JSON array when either `--batch-size` (default 10)
+or `--batch-timeout-ms` (default 1000 ms) is reached. The server acknowledges accepted
+batches and updates its meter and device state. See
+[Measurement ingestion](#measurement-ingestion) for the payload.
+
+Neither the meter nor the receiver has to be up when the gateway starts, and neither taking
+it down stops it — see [Surviving a failure](#surviving-a-failure).
 
 Note that the port of the server address (`59218` above) is assigned by the SNAP and is
 different on every start, so take the address from the output rather than from this README.
@@ -324,7 +332,7 @@ The live state refreshes once per second. Across the three views, the dashboard 
   with the allowed band shaded behind the trace.
 - **Power quality events**: every measurement outside its limit, in words.
 - **SCION transport**: the path in use, last acknowledgement latency, queued readings,
-  and path failover count.
+  path failover count, meter reconnects, and readings the gateway admits it lost.
 - Device inference, kept as a secondary panel.
 
 ### Power-quality limits
@@ -388,6 +396,13 @@ measurement body exactly as documented above:
 | `x-pq-queued-readings` | Readings buffered on the gateway and not yet acknowledged |
 | `x-pq-ack-latency-ms` | Round trip of the gateway's *previous* batch |
 | `x-pq-failover-count` | How often the gateway has changed path since it started |
+| `x-pq-dropped-readings` | Readings the gateway gave up on: shed from a full queue, or refused here |
+| `x-pq-modbus-reconnects` | How often the gateway had to re-establish its connection to the meter |
+
+`x-pq-dropped-readings` is the one that matters when reading the archive: it is the gateway
+admitting there is a hole in it. Without it a gap is indistinguishable from an installation
+that had nothing to report, so the dashboard flags any non-zero value rather than showing it
+as just another count.
 
 Every header is optional and independently parsed. A malformed value is dropped rather than
 failing the batch — measurements must not be rejected over their metadata — and a gateway
@@ -397,6 +412,65 @@ dashboard renders it as text: it arrives from the network.
 
 The **link state** is the one part the receiver judges for itself, from when a batch last
 arrived. A gateway that has stopped sending cannot claim to be connected.
+
+### Surviving a failure
+
+A gateway is only useful if it outlives the things around it. The meter and the receiver are
+separate machines on links the gateway does not control, and both will go away at some point.
+Neither takes the gateway with it.
+
+**Acquisition and upload run as separate tasks.** They have to: a read happens on the cadence
+the meter dictates, a send takes as long as the network takes, and running both in one loop
+means a slow send silently skips readings. They share one queue.
+
+**Readings are removed only once the receiver acknowledges them.** A batch handed to the
+network stays queued until the server answers for it. What the answer was decides what
+happens next:
+
+| Answer | What the gateway does |
+| --- | --- |
+| `2xx` | The receiver has them; they leave the queue |
+| `4xx` | Malformed, and resending changes nothing — discarded, counted, and logged loudly |
+| `5xx`, timeout, no answer | Kept, and sent again after a backoff |
+
+The distinction matters in both directions. Retrying a `4xx` forever would block every
+reading behind a batch that can never be accepted; discarding a `503` would throw away good
+readings because the *receiver* failed to write them to disk.
+
+**The queue is bounded** by `--queue-capacity` (default 5000 readings, roughly an hour of an
+idle installation). When it is full the **oldest** reading is dropped, so the dashboard keeps
+showing the present and the gap lands in the archive instead — and `x-pq-dropped-readings`
+says so.
+
+**The meter reconnects on its own.** Connecting is deferred to the first read, so the gateway
+can start before the meter does; a read that fails drops the connection and retries with a
+backoff from 100 ms to 5 s. A meter that blinks is a gap in the data, not the end of the
+program.
+
+**So does the link.** `scion_http3::Client` pools connections, and a pooled connection
+outlives the receiver it points at: once the receiver has restarted, every request on that
+connection times out, forever. Retrying alone would never recover — so after three batches in
+a row fail to reach the receiver, the gateway rebuilds the connection (`uplink.rs`). This was
+invisible while a failed batch was discarded on the spot, because nothing accumulated to show
+it; it is the difference between a queue that drains when the receiver comes back and one
+that does not.
+
+**Retries are jittered.** Delivery backs off from 500 ms to 30 s, ±25 %, so a fleet of
+gateways coming back after a shared outage does not retry in lockstep.
+
+What this does *not* survive is the gateway itself dying: the queue is in memory, so a crash
+or a power cut loses whatever had not been acknowledged yet. Persisting it is the next step,
+and the queue is deliberately behind a narrow interface (`spool.rs`) so that a disk tier can
+be added without either task changing.
+
+To watch it work, cut the link while the client is running:
+
+```bash
+make run-server          # laptop
+make client              # Pi
+make stop-server         # queue depth climbs on the dashboard, nothing is lost
+make run-server          # the backlog drains
+```
 
 ### Reading history
 

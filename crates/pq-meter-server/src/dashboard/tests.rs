@@ -329,6 +329,8 @@ fn transport_state_is_judged_by_the_receiver_not_claimed_by_the_gateway() {
             queued_readings: Some(4),
             last_ack_latency_ms: Some(11.5),
             failover_count: Some(1),
+            dropped_readings: Some(6),
+            modbus_reconnects: Some(2),
         });
         meter.apply_reading(lab_reading(500.0, 230.0, 50.0), &mut method);
     }
@@ -343,6 +345,8 @@ fn transport_state_is_judged_by_the_receiver_not_claimed_by_the_gateway() {
     assert_eq!(value["transport"]["last_ack_latency_ms"], 11.5);
     assert_eq!(value["transport"]["queued_readings"], 4);
     assert_eq!(value["transport"]["failover_count"], 1);
+    assert_eq!(value["transport"]["dropped_readings"], 6);
+    assert_eq!(value["transport"]["modbus_reconnects"], 2);
 }
 
 #[test]

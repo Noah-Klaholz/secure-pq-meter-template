@@ -257,6 +257,11 @@ export function createOverview({ onRename } = {}) {
       text('ack-latency', transport.last_ack_latency_ms == null ? '—' : `${show(transport.last_ack_latency_ms)} ms`);
       text('queued-readings', transport.queued_readings == null ? '—' : integer.format(transport.queued_readings));
       text('failover-count', transport.failover_count == null ? '—' : integer.format(transport.failover_count));
+      text('modbus-reconnects', transport.modbus_reconnects == null ? '—' : integer.format(transport.modbus_reconnects));
+      // Readings the gateway admits it lost. Anything above zero is a hole in the archive,
+      // so it is flagged rather than shown as just another count.
+      text('dropped-readings', transport.dropped_readings == null ? '—' : integer.format(transport.dropped_readings));
+      byId('dropped-readings').className = transport.dropped_readings ? 'breach-text' : '';
       text('readings-count', integer.format(snapshot.readings_received));
       text('last-reading', snapshot.last_received_at ? time.format(new Date(snapshot.last_received_at)) : 'No readings yet');
       text('last-sync', `Synchronized ${time.format(new Date(snapshot.generated_at))}`);

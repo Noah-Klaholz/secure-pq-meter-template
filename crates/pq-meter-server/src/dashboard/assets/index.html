@@ -99,10 +99,12 @@
                 <div><dt>Last acknowledgement</dt><dd id="ack-latency">—</dd></div>
                 <div><dt>Queued readings</dt><dd id="queued-readings">—</dd></div>
                 <div><dt>Path failovers</dt><dd id="failover-count">—</dd></div>
+                <div><dt>Meter reconnects</dt><dd id="modbus-reconnects">—</dd></div>
+                <div><dt>Readings lost</dt><dd id="dropped-readings">—</dd></div>
                 <div><dt>Readings received</dt><dd id="readings-count">—</dd></div>
                 <div><dt>Last reading</dt><dd id="last-reading">—</dd></div>
               </dl>
-              <p class="panel-footnote" id="transport-footnote">Path, queue and failover count are reported by the gateway; the link state is judged here from arrival times.</p>
+              <p class="panel-footnote" id="transport-footnote">Path, queue, failover, reconnect and loss counts are reported by the gateway; the link state is judged here from arrival times. A non-zero loss count means the gateway ran out of room during an outage and the archive has a gap.</p>
             </article>
 
           </div>
