@@ -524,29 +524,37 @@ The frontend separates HTTP requests (`assets/api.js`), polling and lifecycle
 (`assets/charts.js`). Hash navigation in `app.js` switches the three view sections, and
 the rename dialog stays independent of the polling-rendered device rows.
 
-History is **persistent by default**. Every validated gateway request is appended as one
-JSON line to `measurement-history.jsonl` in the server's working directory. Use
-`--history-file /path/to/measurement-history.jsonl` to select a durable location. Each line
-contains `schema_version: 1`, the receiver's `received_at` timestamp and the full `readings`
-array (including phases, nullable measurements, meter timestamps and heartbeat flags).
-All accepted readings are retained on disk; the archive is not automatically pruned.
+History is **persistent by default** in the local SQLite database
+`data/history.db`. Use `--history-file /path/to/history.db` to select another database
+location. Every accepted measurement is committed directly to SQLite before live state,
+device inference, or the HTTP acknowledgement is updated. The complete measurement object
+is retained, including phases, nullable values, meter timestamps, and heartbeat flags.
 
-The receiver commits and syncs the complete batch before updating live state or
-acknowledging it. Storage failures return HTTP 503 without applying the batch to device
-inference. A partial trailing batch from an interrupted write is discarded at startup;
-malformed complete records or unsupported schema versions stop startup rather than silently
-losing data. An exclusive file lock prevents two receivers writing the same archive.
-As with the existing ingestion API, a request retried after an ambiguous/lost acknowledgement
-can be stored twice; the protocol has no batch IDs for deduplication.
+On startup, an existing `measurement-history.jsonl` file is automatically imported into
+SQLite in one transaction. A migration metadata record and source hash make the import
+idempotent across restarts; if the source changes after migration, startup refuses to
+duplicate-import it. The original JSONL file is kept and is never deleted automatically.
+Migration failures leave that file untouched. No SQLite server or external service is
+needed; the Rust build uses SQLite bundled with `rusqlite`.
 
-Startup streams the archive and retains only the latest 600 readings in memory. The
-History tab displays the last recorded 60-second window even after a long downtime, with
-the original dates/times and the total saved reading count. Older readings remain in the
-JSONL archive for analysis; the dashboard does not yet offer time-range browsing. The
-API adds `persistent` and `stored_readings` to the history response. Saved measurements
-are not replayed into live device inference or transport state: each receiver session
-establishes a fresh baseline from new readings. Device changes themselves are still only
-kept as the most recent change in the current session.
+The database keeps the full archive and indexes receipt timestamps. The History tab queries
+only the latest 60-second window, while the in-memory chart cache retains at most 600
+readings. Saved measurements are not replayed into live device inference or transport state:
+each receiver session establishes a fresh baseline from new readings. The API adds
+`persistent` and `stored_readings` to the history response.
+
+To inspect the database locally:
+
+```bash
+sqlite3 data/history.db
+```
+
+Useful queries include:
+
+```sql
+SELECT COUNT(*) FROM measurements;
+SELECT * FROM measurements ORDER BY received_at DESC LIMIT 10;
+```
 
 Validation for this module:
 
