@@ -444,7 +444,7 @@ def format_report(analysis: dict[str, Any], limit: int = 10) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze measurement history for anomalies")
-    parser.add_argument("--jsonl", default="measurement-history.jsonl")
+    parser.add_argument("--jsonl", default="data/measurement-history_chris.jsonl")
     parser.add_argument("--db", default="data/history.db")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--baseline-prefilter-threshold", type=float, default=6.0)
