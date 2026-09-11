@@ -109,6 +109,7 @@ const views = {
   'power-quality': ['Power Quality', 'POWER QUALITY / LIVE STATE', 'Three-phase measurements from the meter, carried over SCION.'],
   'connected-devices': ['Connected Devices', 'DEVICES / LIVE STATE', 'Recognized devices, saved names and inferred activity.'],
   history: ['History', 'MEASUREMENTS / SAVED HISTORY', 'Measurements are saved across restarts. Charts show the latest recorded 60 seconds.'],
+  settings: ['Settings', 'CONFIGURATION / CLIENT THRESHOLDS', 'Adjust thresholds and the settling window. Changes are sent to the client over SCION.'],
 };
 function navigate(focus = false) {
   const requested = location.hash.slice(1);
@@ -184,5 +185,90 @@ document.getElementById('rename-form').addEventListener('submit', async event =>
     saving = false;
     save.disabled = cancel.disabled = nameInput.disabled = false;
     save.textContent = 'Save name';
+  }
+});
+
+// ---- Settings synchronization ----
+
+const syncButton = document.getElementById('sync-settings');
+const settingsStatus = document.getElementById('settings-status');
+
+// Wire up enable/disable toggles to disable their associated inputs.
+for (const [checkboxId, inputIds] of [
+  ['voltage-enabled', ['voltage-step']],
+  ['frequency-enabled', ['frequency-step']],
+  ['thd-voltage-enabled', ['thd-voltage-step']],
+  ['thd-current-enabled', ['thd-current-step']],
+  ['settling-enabled', ['settling-seconds']],
+]) {
+  const checkbox = document.getElementById(checkboxId);
+  const inputs = inputIds.map(id => document.getElementById(id));
+  checkbox.addEventListener('change', () => {
+    for (const input of inputs) input.disabled = !checkbox.checked;
+  });
+}
+
+syncButton.addEventListener('click', async () => {
+  syncButton.disabled = true;
+  syncButton.textContent = 'Synchronizing…';
+  settingsStatus.textContent = '';
+  try {
+    const config = {};
+
+    const voltageEnabled = document.getElementById('voltage-enabled').checked;
+    config.voltage_enabled = voltageEnabled;
+    if (voltageEnabled) {
+      config.voltage_step_v = parseFloat(document.getElementById('voltage-step').value);
+    }
+
+    const frequencyEnabled = document.getElementById('frequency-enabled').checked;
+    config.frequency_enabled = frequencyEnabled;
+    if (frequencyEnabled) {
+      config.frequency_step_hz = parseFloat(document.getElementById('frequency-step').value);
+    }
+
+    const thdVoltageEnabled = document.getElementById('thd-voltage-enabled').checked;
+    config.thd_voltage_enabled = thdVoltageEnabled;
+    if (thdVoltageEnabled) {
+      config.thd_voltage_step_pct = parseFloat(document.getElementById('thd-voltage-step').value);
+    }
+
+    const thdCurrentEnabled = document.getElementById('thd-current-enabled').checked;
+    config.thd_current_enabled = thdCurrentEnabled;
+    if (thdCurrentEnabled) {
+      config.thd_current_step_pct = parseFloat(document.getElementById('thd-current-step').value);
+    }
+
+    const settlingEnabled = document.getElementById('settling-enabled').checked;
+    if (settlingEnabled) {
+      config.settling_window_secs = parseInt(document.getElementById('settling-seconds').value, 10);
+    } else {
+      config.settling_window_secs = null;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch('/api/v1/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+        signal: controller.signal,
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Failed to queue settings.');
+      settingsStatus.textContent = 'Settings queued — will be sent to the client with the next measurement batch.';
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    settingsStatus.textContent = error.name === 'AbortError'
+      ? 'Synchronization timed out. Please retry.'
+      : error.message || 'Could not synchronize settings.';
+    settingsStatus.style.color = '#a04942';
+    setTimeout(() => { settingsStatus.style.color = ''; }, 5000);
+  } finally {
+    syncButton.disabled = false;
+    syncButton.textContent = '⟳ Synchronize to client';
   }
 });

@@ -227,6 +227,7 @@ async fn full_e2e_pipeline_modbus_to_client_to_server_to_dashboard() {
         meter: meter.clone(),
         decision_method,
         reading_decoder,
+        pending_config: Arc::new(Mutex::new(None)),
     };
     let ingestion_app = api_router("/edh/v1/hello", app_state);
 
@@ -234,7 +235,7 @@ async fn full_e2e_pipeline_modbus_to_client_to_server_to_dashboard() {
         meter: meter.clone(),
         decision_method: "settled",
     });
-    let dashboard_app = dashboard::router(dashboard_source);
+    let dashboard_app = dashboard::router(dashboard_source, Arc::new(Mutex::new(None)));
 
     // ==========================================
     // Phase 1: Record Baseline (100.0 W)

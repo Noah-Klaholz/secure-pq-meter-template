@@ -4,7 +4,7 @@
 //! public distribution networks. Keeping the rule here rather than in the dashboard's
 //! JavaScript means one definition, checked by tests, that the UI only has to colour in.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::input::{MeterReading, PhaseReading};
 
@@ -201,6 +201,34 @@ pub fn violations(reading: &MeterReading) -> Vec<Violation> {
     }
 
     found
+}
+
+/// Threshold configuration sent to the client to override its defaults.
+///
+/// Each threshold range is optional: `None` means the client keeps its current value.
+/// An explicitly disabled threshold tells the client to stop checking that quantity.
+/// The settling window can similarly be disabled by setting it to `None`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClientThresholdConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voltage_step_v: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voltage_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_step_hz: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frequency_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thd_voltage_step_pct: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thd_voltage_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thd_current_step_pct: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thd_current_enabled: Option<bool>,
+    /// Settling window in seconds. `None` disables the settling window entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settling_window_secs: Option<Option<u64>>,
 }
 
 #[cfg(test)]

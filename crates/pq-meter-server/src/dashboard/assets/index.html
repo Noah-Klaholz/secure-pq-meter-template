@@ -22,6 +22,7 @@
         <a class="nav-item selected" href="#power-quality" aria-current="page">Power Quality</a>
         <a class="nav-item" href="#connected-devices">Connected Devices</a>
         <a class="nav-item" href="#history">History</a>
+        <a class="nav-item" href="#settings">Settings</a>
       </nav>
       <div class="sidebar-note"><span class="tiny-dot"></span> SCION meter receiver<p>Measurement history<br>Saved on receiver</p></div>
     </aside>
@@ -186,6 +187,87 @@
           </div>
         </article>
 
+      </section>
+      <section id="settings" class="dashboard-view" aria-label="Settings" hidden>
+        <div class="view-stack">
+          <article class="panel">
+            <div class="panel-heading">
+              <div><h2>Client threshold configuration</h2><p>Adjust thresholds and settling window. Changes are sent to the client on the next synchronization.</p></div>
+            </div>
+            <div class="settings-form">
+              <div class="settings-group">
+                <h3 class="settings-group-title">Voltage step threshold</h3>
+                <div class="setting-row">
+                  <label class="setting-toggle">
+                    <input type="checkbox" id="voltage-enabled" checked>
+                    <span>Enabled</span>
+                  </label>
+                </div>
+                <div class="setting-row">
+                  <label for="voltage-step">Threshold (V)</label>
+                  <input type="number" id="voltage-step" value="1.5" step="0.1" class="setting-input">
+                </div>
+              </div>
+              <div class="settings-group">
+                <h3 class="settings-group-title">Frequency step threshold</h3>
+                <div class="setting-row">
+                  <label class="setting-toggle">
+                    <input type="checkbox" id="frequency-enabled" checked>
+                    <span>Enabled</span>
+                  </label>
+                </div>
+                <div class="setting-row">
+                  <label for="frequency-step">Threshold (Hz)</label>
+                  <input type="number" id="frequency-step" value="0.2" step="0.1" class="setting-input">
+                </div>
+              </div>
+              <div class="settings-group">
+                <h3 class="settings-group-title">Voltage distortion step (THD<sub>U</sub>)</h3>
+                <div class="setting-row">
+                  <label class="setting-toggle">
+                    <input type="checkbox" id="thd-voltage-enabled" checked>
+                    <span>Enabled</span>
+                  </label>
+                </div>
+                <div class="setting-row">
+                  <label for="thd-voltage-step">Threshold (%)</label>
+                  <input type="number" id="thd-voltage-step" value="1.0" step="0.1" class="setting-input">
+                </div>
+              </div>
+              <div class="settings-group">
+                <h3 class="settings-group-title">Current distortion step (THD<sub>I</sub>)</h3>
+                <div class="setting-row">
+                  <label class="setting-toggle">
+                    <input type="checkbox" id="thd-current-enabled" checked>
+                    <span>Enabled</span>
+                  </label>
+                </div>
+                <div class="setting-row">
+                  <label for="thd-current-step">Threshold (%)</label>
+                  <input type="number" id="thd-current-step" value="15.0" step="0.1" class="setting-input">
+                </div>
+              </div>
+              <div class="settings-group">
+                <h3 class="settings-group-title">Settling window</h3>
+                <div class="setting-row">
+                  <label class="setting-toggle">
+                    <input type="checkbox" id="settling-enabled" checked>
+                    <span>Enabled</span>
+                  </label>
+                </div>
+                <div class="setting-row">
+                  <label for="settling-seconds">Duration (seconds)</label>
+                  <input type="number" id="settling-seconds" value="2" min="1" max="60" step="1" class="setting-input">
+                </div>
+              </div>
+            </div>
+            <div class="settings-actions">
+              <p id="settings-status" class="save-status" role="status"></p>
+              <button id="sync-settings" type="button">⟳ Synchronize to client</button>
+            </div>
+            <p class="panel-footnote">Changes are queued and delivered to the client as a response to its next measurement batch over SCION. Disabling a threshold or the settling window takes effect immediately on the client once synchronized.</p>
+          </article>
+        </div>
       </section>
         <footer class="page-footer"><span>Voltages phase-to-neutral · Power signed, negative is export · Device power is nominal, not individually measured.</span><span id="last-sync">Not yet synchronized</span></footer>
     </main>

@@ -17,6 +17,7 @@ use crate::{
     decision::{DecisionMethod, DeviceChange},
     input::SharedReadingDecoder,
     meter::SharedMeterState,
+    quality::ClientThresholdConfig,
     transport::GatewayTransport,
 };
 
@@ -34,6 +35,7 @@ pub(crate) struct AppState {
     pub(crate) meter: SharedMeterState,
     pub(crate) decision_method: SharedDecisionMethod,
     pub(crate) reading_decoder: SharedReadingDecoder,
+    pub(crate) pending_config: Arc<Mutex<Option<ClientThresholdConfig>>>,
 }
 
 /// Serves the HTTP/3 application on `socket` until the process is stopped.
@@ -43,11 +45,13 @@ pub async fn serve(
     meter: SharedMeterState,
     decision_method: SharedDecisionMethod,
     reading_decoder: SharedReadingDecoder,
+    pending_config: Arc<Mutex<Option<ClientThresholdConfig>>>,
 ) -> anyhow::Result<()> {
     let app_state = AppState {
         meter,
         decision_method,
         reading_decoder,
+        pending_config,
     };
     let app = router(path, app_state);
     let config = quic_config().context("building the QUIC server configuration")?;
@@ -148,6 +152,15 @@ fn apply_batch(
     if count > 1 {
         // Keep the acknowledgement bounded: the client reads at most 4096 bytes.
         response = format!("accepted {count} readings: {additions} added, {removals} removed\n");
+    }
+
+    // If there is a pending threshold configuration, append it as a JSON line that the
+    // client recognises and applies. The next batch will not carry it again.
+    if let Ok(mut pending) = state.pending_config.lock() {
+        if let Some(config) = pending.take() {
+            let config_json = serde_json::to_string(&config).unwrap_or_default();
+            response.push_str(&format!("\n__CONFIG_SYNC__:{config_json}"));
+        }
     }
 
     (StatusCode::OK, response)
@@ -251,6 +264,7 @@ mod tests {
             meter: Arc::new(Mutex::new(MeterState::new(DUMMY_DEVICE_CATALOG.to_vec()))),
             decision_method: Arc::new(Mutex::new(method)),
             reading_decoder: Arc::new(crate::input::JsonReadingDecoder),
+            pending_config: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -268,6 +282,7 @@ mod tests {
             )),
             decision_method: Arc::new(Mutex::new(Box::new(ClosestPowerMatch::new(3.0)))),
             reading_decoder: Arc::new(crate::input::JsonReadingDecoder),
+            pending_config: Arc::new(Mutex::new(None)),
         };
         let (status, _) = post_json(
             state.clone(),
@@ -493,6 +508,7 @@ mod tests {
             meter: meter.clone(),
             decision_method: Arc::new(Mutex::new(Box::new(ClosestPowerMatch::new(3.0)))),
             reading_decoder: Arc::new(crate::input::JsonReadingDecoder),
+            pending_config: Arc::new(Mutex::new(None)),
         };
         let source = LiveMeterSource {
             meter,
@@ -552,6 +568,7 @@ mod tests {
             meter,
             decision_method: Arc::new(Mutex::new(Box::new(ClosestPowerMatch::new(3.0)))),
             reading_decoder: Arc::new(crate::input::JsonReadingDecoder),
+            pending_config: Arc::new(Mutex::new(None)),
         };
 
         // First reading: baseline

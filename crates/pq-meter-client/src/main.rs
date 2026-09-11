@@ -29,7 +29,13 @@ use anyhow::Context;
 use clap::Parser;
 use scion_http3::{Client, Request};
 use sciparse::address::ip_socket_addr::ScionSocketIpAddr;
+
+
+
+use serde::Deserialize;
+use tokio::sync::mpsc;
 use tokio::sync::Notify;
+
 use tokio_modbus::Slave;
 use umg605_modbus_client::{DEFAULT_MODBUS_PORT, PHASE_COUNT, Phases, Snapshot};
 use url::Url;
@@ -249,6 +255,7 @@ async fn main() -> anyhow::Result<()> {
     let spool = Arc::new(Mutex::new(Spool::new(queue_capacity)));
     let queued = Arc::new(Notify::new());
     let reconnects = Arc::new(AtomicU64::new(0));
+    let (config_tx, config_rx) = mpsc::channel(10);
 
     let acquisition = tokio::spawn(acquire(
         meter,
@@ -257,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&spool),
         Arc::clone(&queued),
         Arc::clone(&reconnects),
+        config_rx,
     ));
 
     let url = format!("https://{SERVER_NAME}:{}{}", server_scion.port(), args.path);
@@ -271,6 +279,7 @@ async fn main() -> anyhow::Result<()> {
         spool,
         queued,
         reconnects,
+        config_tx,
     ));
 
     // Neither task returns on its own, so reaching here means one of them panicked. Losing
@@ -309,6 +318,99 @@ const SETTLING_WINDOW: Duration = Duration::from_secs(2);
 ///
 /// The energy counters are deliberately left out: they only ever climb, so including them
 /// would make every single reading look like a state change.
+/// Threshold configuration received from the server, used to override the defaults.
+#[derive(Clone, Debug, Deserialize)]
+struct ClientThresholdConfig {
+    #[serde(default)]
+    voltage_step_v: Option<f32>,
+    #[serde(default)]
+    voltage_enabled: Option<bool>,
+    #[serde(default)]
+    frequency_step_hz: Option<f32>,
+    #[serde(default)]
+    frequency_enabled: Option<bool>,
+    #[serde(default)]
+    thd_voltage_step_pct: Option<f32>,
+    #[serde(default)]
+    thd_voltage_enabled: Option<bool>,
+    #[serde(default)]
+    thd_current_step_pct: Option<f32>,
+    #[serde(default)]
+    thd_current_enabled: Option<bool>,
+    /// Settling window in seconds. `None` disables the settling window entirely.
+    /// `Some(None)` = disable, `Some(Some(n))` = n seconds.
+    #[serde(default)]
+    settling_window_secs: Option<Option<u64>>,
+}
+
+/// Runtime-adjustable thresholds. Initially set to the compile-time defaults.
+#[derive(Clone, Debug)]
+struct ActiveThresholds {
+    frequency_hz: f32,
+    frequency_enabled: bool,
+    voltage_v: f32,
+    voltage_enabled: bool,
+    current_a: f32,
+    real_power_w: f32,
+    apparent_power_va: f32,
+    reactive_power_var: f32,
+    cos_phi: f32,
+    thd_voltage_pct: f32,
+    thd_voltage_enabled: bool,
+    thd_current_pct: f32,
+    thd_current_enabled: bool,
+}
+
+impl Default for ActiveThresholds {
+    fn default() -> Self {
+        Self {
+            frequency_hz: THRESHOLD_FREQUENCY_HZ,
+            frequency_enabled: true,
+            voltage_v: THRESHOLD_VOLTAGE_V,
+            voltage_enabled: true,
+            current_a: THRESHOLD_CURRENT_A,
+            real_power_w: THRESHOLD_REAL_POWER_W,
+            apparent_power_va: THRESHOLD_APPARENT_POWER_VA,
+            reactive_power_var: THRESHOLD_REACTIVE_POWER_VAR,
+            cos_phi: THRESHOLD_COS_PHI,
+            thd_voltage_pct: THRESHOLD_THD_VOLTAGE_PCT,
+            thd_voltage_enabled: true,
+            thd_current_pct: THRESHOLD_THD_CURRENT_PCT,
+            thd_current_enabled: true,
+        }
+    }
+}
+
+impl ActiveThresholds {
+    /// Applies a server-pushed config update. Only fields that are `Some` are changed.
+    fn apply_config(&mut self, config: &ClientThresholdConfig) {
+        if let Some(enabled) = config.voltage_enabled {
+            self.voltage_enabled = enabled;
+        }
+        if let Some(step) = config.voltage_step_v {
+            self.voltage_v = step;
+        }
+        if let Some(enabled) = config.frequency_enabled {
+            self.frequency_enabled = enabled;
+        }
+        if let Some(step) = config.frequency_step_hz {
+            self.frequency_hz = step;
+        }
+        if let Some(enabled) = config.thd_voltage_enabled {
+            self.thd_voltage_enabled = enabled;
+        }
+        if let Some(step) = config.thd_voltage_step_pct {
+            self.thd_voltage_pct = step;
+        }
+        if let Some(enabled) = config.thd_current_enabled {
+            self.thd_current_enabled = enabled;
+        }
+        if let Some(step) = config.thd_current_step_pct {
+            self.thd_current_pct = step;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BaselineReading {
     frequency: f32,
@@ -339,8 +441,8 @@ impl BaselineReading {
         }
     }
 
-    fn exceeds_threshold(&self, new: &BaselineReading) -> bool {
-        exceeds(self.frequency, new.frequency, THRESHOLD_FREQUENCY_HZ)
+    fn exceeds_threshold(&self, new: &BaselineReading, thresholds: &ActiveThresholds) -> bool {
+        (thresholds.frequency_enabled && exceeds(self.frequency, new.frequency, thresholds.frequency_hz))
             || exceeds(
                 self.real_power_sum3,
                 new.real_power_sum3,
@@ -356,12 +458,12 @@ impl BaselineReading {
                 new.reactive_power_sum3,
                 THRESHOLD_REACTIVE_POWER_SUM_VAR,
             )
-            || exceeds_any_phase(self.voltage, new.voltage, THRESHOLD_VOLTAGE_V)
-            || exceeds_any_phase(self.current, new.current, THRESHOLD_CURRENT_A)
-            || exceeds_any_phase(self.real_power, new.real_power, THRESHOLD_REAL_POWER_W)
-            || exceeds_any_phase(self.cos_phi, new.cos_phi, THRESHOLD_COS_PHI)
-            || exceeds_any_phase(self.thd_voltage, new.thd_voltage, THRESHOLD_THD_VOLTAGE_PCT)
-            || exceeds_any_phase(self.thd_current, new.thd_current, THRESHOLD_THD_CURRENT_PCT)
+            || (thresholds.voltage_enabled && exceeds_any_phase(self.voltage, new.voltage, thresholds.voltage_v))
+            || exceeds_any_phase(self.current, new.current, thresholds.current_a)
+            || exceeds_any_phase(self.real_power, new.real_power, thresholds.real_power_w)
+            || exceeds_any_phase(self.cos_phi, new.cos_phi, thresholds.cos_phi)
+            || (thresholds.thd_voltage_enabled && exceeds_any_phase(self.thd_voltage, new.thd_voltage, thresholds.thd_voltage_pct))
+            || (thresholds.thd_current_enabled && exceeds_any_phase(self.thd_current, new.thd_current, thresholds.thd_current_pct))
     }
 }
 
@@ -473,6 +575,7 @@ struct SettlingCandidate {
 
 struct SettledMonitor {
     settling_window: Duration,
+    settling_enabled: bool,
     baseline: Option<BaselineReading>,
     candidate: Option<SettlingCandidate>,
 }
@@ -481,29 +584,55 @@ impl SettledMonitor {
     fn new(settling_window: Duration) -> Self {
         Self {
             settling_window,
+            settling_enabled: true,
             baseline: None,
             candidate: None,
         }
     }
 
+    /// Returns `true` if a reading has exceeded the baseline but hasn't settled yet.
+    fn is_settling(&self) -> bool {
+        self.candidate.is_some()
+    }
+
+    fn update_settling(&mut self, secs: Option<u64>) {
+        match secs {
+            None => {
+                self.settling_enabled = false;
+            }
+            Some(secs) => {
+                self.settling_enabled = true;
+                self.settling_window = Duration::from_secs(secs);
+            }
+        }
+        // Reset any in-progress candidate when the window changes.
+        self.candidate = None;
+    }
+
     /// Processes a new reading. Returns `true` if this reading should be recorded
     /// (and committed as the new baseline).
-    fn process_reading(&mut self, current: BaselineReading, now: Instant) -> bool {
+    fn process_reading(&mut self, current: BaselineReading, now: Instant, thresholds: &ActiveThresholds) -> bool {
         let Some(base) = self.baseline else {
             // First reading establishes the baseline immediately.
             self.baseline = Some(current);
             return true;
         };
 
-        if !base.exceeds_threshold(&current) {
+        if !base.exceeds_threshold(&current, thresholds) {
             // Within noise margin of current baseline: discard any transient candidate.
             self.candidate = None;
             return false;
         }
 
+        // When settling is disabled, every threshold crossing is immediately accepted.
+        if !self.settling_enabled {
+            self.baseline = Some(current);
+            return true;
+        }
+
         // Reading exceeds baseline threshold: we are observing a potential state change.
         match self.candidate {
-            Some(cand) if !cand.reading.exceeds_threshold(&current) => {
+            Some(cand) if !cand.reading.exceeds_threshold(&current, thresholds) => {
                 // Reading is stable with respect to the candidate level.
                 if now
                     .checked_duration_since(cand.first_seen)
@@ -539,12 +668,16 @@ impl SettledMonitor {
 /// reports itself stale while it is in fact healthy.
 fn should_record(
     changed: bool,
+    is_settling: bool,
     heartbeat: Option<Duration>,
     last_recorded: Option<Instant>,
     now: Instant,
 ) -> bool {
     if changed {
         return true;
+    }
+    if is_settling {
+        return false;
     }
     heartbeat.is_some_and(|interval| {
         last_recorded
@@ -567,15 +700,22 @@ async fn acquire(
     spool: Arc<Mutex<Spool>>,
     queued: Arc<Notify>,
     reconnects: Arc<AtomicU64>,
+    mut config_rx: mpsc::Receiver<ClientThresholdConfig>,
 ) {
     let mut interval = tokio::time::interval(period);
-    // A read that overruns must not be repaid with a burst of catch-up reads: the meter is
-    // slow, and asking it faster will not make it quicker.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut settled_monitor = SettledMonitor::new(SETTLING_WINDOW);
+    let mut active_thresholds = ActiveThresholds::default();
     let mut last_recorded: Option<Instant> = None;
 
     loop {
+        while let Ok(config) = config_rx.try_recv() {
+            active_thresholds.apply_config(&config);
+            if let Some(settling) = config.settling_window_secs {
+                settled_monitor.update_settling(settling);
+            }
+            println!("Applied threshold configuration update");
+        }
         interval.tick().await;
         let start = Instant::now();
 
@@ -597,8 +737,8 @@ async fn acquire(
         };
 
         let current_reading = BaselineReading::from_snapshot(&snapshot);
-        let changed = settled_monitor.process_reading(current_reading, start);
-        if should_record(changed, heartbeat, last_recorded, start) {
+        let changed = settled_monitor.process_reading(current_reading, start, &active_thresholds);
+        if should_record(changed, settled_monitor.is_settling(), heartbeat, last_recorded, start) {
             last_recorded = Some(start);
 
             let depth = {
@@ -643,6 +783,7 @@ async fn upload(
     spool: Arc<Mutex<Spool>>,
     queued: Arc<Notify>,
     reconnects: Arc<AtomicU64>,
+    config_tx: mpsc::Sender<ClientThresholdConfig>,
 ) {
     let mut delivery = DeliveryStats::default();
     let mut backoff = Backoff::new(SEND_RETRY_BASE, SEND_RETRY_MAX);
@@ -712,7 +853,10 @@ async fn upload(
         .await;
 
         match outcome {
-            Delivery::Accepted => {
+            Delivery::Accepted(config_opt) => {
+                if let Some(config) = config_opt {
+                    let _ = config_tx.send(config).await;
+                }
                 uplink.note_reachable();
                 lock(&spool).commit(&lease);
                 backoff.reset();
@@ -749,10 +893,10 @@ async fn upload(
 }
 
 /// What became of a batch the gateway tried to deliver.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 enum Delivery {
-    /// The receiver has the readings. They can be removed from the queue.
-    Accepted,
+    /// The receiver has the readings. They can be removed from the queue. Optionally holds a new config.
+    Accepted(Option<ClientThresholdConfig>),
     /// The receiver refused the readings and always will. Keeping them blocks the queue.
     Rejected,
     /// Nobody answered, or the receiver could not take them right now. Try again later.
@@ -762,7 +906,7 @@ enum Delivery {
 /// Classifies what the receiver said about a batch.
 fn classify(status: scion_http3::http::StatusCode) -> Delivery {
     if status.is_success() {
-        Delivery::Accepted
+        Delivery::Accepted(None)
     } else if status.is_client_error() {
         // 400 means the batch is malformed and resending it changes nothing.
         Delivery::Rejected
@@ -794,15 +938,13 @@ async fn send_batch(
     send_timeout: Duration,
 ) -> Delivery {
     if batch.is_empty() {
-        return Delivery::Accepted;
+        return Delivery::Accepted(None);
     }
 
     let count = batch.len();
     let body = match serde_json::to_vec(batch) {
         Ok(body) => body,
         Err(err) => {
-            // A reading that will not serialize will not serialize on the next attempt
-            // either, so this batch is poison rather than delayed.
             eprintln!("Warning: encoding the measurement batch failed: {err}");
             return Delivery::Rejected;
         }
@@ -846,24 +988,40 @@ async fn send_batch(
 
     let status = response.status();
     let elapsed = send_start.elapsed();
-    let outcome = classify(status);
+    let mut outcome = classify(status);
 
-    if outcome == Delivery::Accepted {
-        // Only a round trip that completed says anything about how long the link takes. The
-        // backlog itself is read from the spool on the next pass, so it is never guessed at
-        // here: whether these readings have left the queue is the caller's decision.
+    if matches!(outcome, Delivery::Accepted(_)) {
         delivery.last_ack_latency_ms = Some(elapsed.as_secs_f32() * 1000.0);
     } else {
         eprintln!("Warning: server answered with {status} ({elapsed:.2?})");
     }
 
+    let mut config_update = None;
     let answer = match response.text(Some(MAX_BODY_SIZE)).await {
         Ok((text, _)) => {
             let trimmed = text.trim();
-            if trimmed.is_empty() {
+            for line in trimmed.lines() {
+                if let Some(json) = line.strip_prefix("__CONFIG_SYNC__:") {
+                    match serde_json::from_str::<ClientThresholdConfig>(json) {
+                        Ok(config) => {
+                            println!("Received threshold configuration update from server");
+                            config_update = Some(config);
+                        }
+                        Err(err) => {
+                            eprintln!("Warning: failed to parse config sync: {err}");
+                        }
+                    }
+                }
+            }
+            let display: String = trimmed.lines()
+                .filter(|line| !line.starts_with("__CONFIG_SYNC__:"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            
+            if display.is_empty() {
                 String::new()
             } else {
-                format!(": {trimmed}")
+                format!(": {display}")
             }
         }
         Err(_) => String::new(),
@@ -871,6 +1029,10 @@ async fn send_batch(
     println!(
         "Flushed {count} measurement(s) ({reason}) in {elapsed:.2?} -> server answered {status}{answer}"
     );
+
+    if let Delivery::Accepted(ref mut opt) = outcome {
+        *opt = config_update;
+    }
 
     outcome
 }
@@ -1230,7 +1392,7 @@ mod tests {
             thd_voltage: [1.9, f32::NAN, f32::NAN], // delta 0.4 <= 1.0
             thd_current: [4.5, f32::NAN, f32::NAN], // delta 3.0 <= 15.0
         };
-        assert!(!baseline.exceeds_threshold(&noisy));
+        assert!(!baseline.exceeds_threshold(&noisy, &ActiveThresholds::default()));
     }
 
     #[test]
@@ -1263,7 +1425,7 @@ mod tests {
             thd_current: [125.79, f32::NAN, f32::NAN],
         };
 
-        assert!(!baseline.exceeds_threshold(&extreme_reading));
+        assert!(!baseline.exceeds_threshold(&extreme_reading, &ActiveThresholds::default()));
     }
 
     #[test]
@@ -1294,7 +1456,7 @@ mod tests {
             thd_current: [119.26, f32::NAN, f32::NAN],
         };
 
-        assert!(!reading_a.exceeds_threshold(&reading_b));
+        assert!(!reading_a.exceeds_threshold(&reading_b, &ActiveThresholds::default()));
     }
 
     #[test]
@@ -1303,43 +1465,43 @@ mod tests {
 
         let mut reading = baseline;
         reading.voltage[0] += 2.0; // > 1.5
-        assert!(baseline.exceeds_threshold(&reading));
+        assert!(baseline.exceeds_threshold(&reading, &ActiveThresholds::default()));
 
         let mut reading = baseline;
         reading.current[0] += 0.10; // > 0.06
-        assert!(baseline.exceeds_threshold(&reading));
+        assert!(baseline.exceeds_threshold(&reading, &ActiveThresholds::default()));
 
         let mut reading = baseline;
         reading.frequency -= 0.30; // > 0.2
-        assert!(baseline.exceeds_threshold(&reading));
+        assert!(baseline.exceeds_threshold(&reading, &ActiveThresholds::default()));
 
         let mut reading = baseline;
         reading.real_power[0] += 5.0; // > 4.0
-        assert!(baseline.exceeds_threshold(&reading));
+        assert!(baseline.exceeds_threshold(&reading, &ActiveThresholds::default()));
 
         let mut reading = baseline;
         reading.real_power_sum3 += 13.0; // > 3 * 4.0
-        assert!(baseline.exceeds_threshold(&reading));
+        assert!(baseline.exceeds_threshold(&reading, &ActiveThresholds::default()));
 
         let mut reading = baseline;
         reading.apparent_power_sum3 += 25.0; // > 3 * 8.0
-        assert!(baseline.exceeds_threshold(&reading));
+        assert!(baseline.exceeds_threshold(&reading, &ActiveThresholds::default()));
 
         let mut reading = baseline;
         reading.reactive_power_sum3 += 10.0; // > 3 * 3.0
-        assert!(baseline.exceeds_threshold(&reading));
+        assert!(baseline.exceeds_threshold(&reading, &ActiveThresholds::default()));
 
         let mut reading = baseline;
         reading.cos_phi[0] -= 0.10; // > 0.08
-        assert!(baseline.exceeds_threshold(&reading));
+        assert!(baseline.exceeds_threshold(&reading, &ActiveThresholds::default()));
 
         let mut reading = baseline;
         reading.thd_voltage[0] += 1.5; // > 1.0
-        assert!(baseline.exceeds_threshold(&reading));
+        assert!(baseline.exceeds_threshold(&reading, &ActiveThresholds::default()));
 
         let mut reading = baseline;
         reading.thd_current[0] += 16.0; // > 15.0
-        assert!(baseline.exceeds_threshold(&reading));
+        assert!(baseline.exceeds_threshold(&reading, &ActiveThresholds::default()));
     }
 
     #[test]
@@ -1354,7 +1516,7 @@ mod tests {
             reading.current[phase] = 1.0;
             reading.real_power[phase] = 230.0;
             assert!(
-                baseline.exceeds_threshold(&reading),
+                baseline.exceeds_threshold(&reading, &ActiveThresholds::default()),
                 "a load on L{} must count as a change",
                 phase + 1
             );
@@ -1367,14 +1529,14 @@ mod tests {
         // unknown value against an unknown value must stay quiet rather than push a
         // reading every 200 ms.
         let baseline = sample_reading();
-        assert!(!baseline.exceeds_threshold(&sample_reading()));
+        assert!(!baseline.exceeds_threshold(&sample_reading(), &ActiveThresholds::default()));
 
         // The same holds when a value becomes available, or stops being available: neither
         // is a measured movement of the value itself.
         let mut appeared = baseline;
         appeared.thd_current[1] = 42.0;
-        assert!(!baseline.exceeds_threshold(&appeared));
-        assert!(!appeared.exceeds_threshold(&baseline));
+        assert!(!baseline.exceeds_threshold(&appeared, &ActiveThresholds::default()));
+        assert!(!appeared.exceeds_threshold(&baseline, &ActiveThresholds::default()));
     }
 
     #[test]
@@ -1383,12 +1545,12 @@ mod tests {
         let mut new_state = baseline;
         new_state.voltage[0] = 235.0; // significant jump > 1.5V
 
-        assert!(baseline.exceeds_threshold(&new_state));
+        assert!(baseline.exceeds_threshold(&new_state, &ActiveThresholds::default()));
         baseline = new_state;
 
         let mut small_fluctuation = new_state;
         small_fluctuation.voltage[0] = 235.4; // delta 0.4 from new baseline 235.0 <= 1.5
-        assert!(!baseline.exceeds_threshold(&small_fluctuation));
+        assert!(!baseline.exceeds_threshold(&small_fluctuation, &ActiveThresholds::default()));
     }
 
     /// Compares phases bit for bit, so that a NaN the meter reported counts as the same
@@ -1590,7 +1752,7 @@ mod tests {
         let t0 = Instant::now();
         let reading = sample_reading();
 
-        assert!(monitor.process_reading(reading, t0));
+        assert!(monitor.process_reading(reading, t0, &ActiveThresholds::default()));
     }
 
     #[test]
@@ -1598,21 +1760,21 @@ mod tests {
         let mut monitor = SettledMonitor::new(Duration::from_secs(2));
         let t0 = Instant::now();
         let baseline = sample_reading();
-        assert!(monitor.process_reading(baseline, t0));
+        assert!(monitor.process_reading(baseline, t0, &ActiveThresholds::default()));
 
         let spike = with_real_power(baseline, baseline.real_power[0] + 40.0);
 
         // Spike appears at t0 + 1s (new candidate)
-        assert!(!monitor.process_reading(spike, t0 + Duration::from_secs(1)));
+        assert!(!monitor.process_reading(spike, t0 + Duration::from_secs(1), &ActiveThresholds::default()));
 
         // Still at spike level at t0 + 2s (1s of settling, < 2s window)
-        assert!(!monitor.process_reading(spike, t0 + Duration::from_secs(2)));
+        assert!(!monitor.process_reading(spike, t0 + Duration::from_secs(2), &ActiveThresholds::default()));
 
         // Drops back to baseline at t0 + 2.5s (< 2s after spike started)
-        assert!(!monitor.process_reading(baseline, t0 + Duration::from_millis(2500)));
+        assert!(!monitor.process_reading(baseline, t0 + Duration::from_millis(2500), &ActiveThresholds::default()));
 
         // Still at baseline at t0 + 5s: never triggered a state change
-        assert!(!monitor.process_reading(baseline, t0 + Duration::from_secs(5)));
+        assert!(!monitor.process_reading(baseline, t0 + Duration::from_secs(5), &ActiveThresholds::default()));
     }
 
     #[test]
@@ -1620,21 +1782,21 @@ mod tests {
         let mut monitor = SettledMonitor::new(Duration::from_secs(2));
         let t0 = Instant::now();
         let baseline = sample_reading();
-        assert!(monitor.process_reading(baseline, t0));
+        assert!(monitor.process_reading(baseline, t0, &ActiveThresholds::default()));
 
         let higher = with_real_power(baseline, baseline.real_power[0] + 40.0);
 
         // Jumps to higher power at t0 + 1s
-        assert!(!monitor.process_reading(higher, t0 + Duration::from_secs(1)));
+        assert!(!monitor.process_reading(higher, t0 + Duration::from_secs(1), &ActiveThresholds::default()));
 
         // 1.5s after jump (t0 + 2.5s): still settling (< 2s)
-        assert!(!monitor.process_reading(higher, t0 + Duration::from_millis(2500)));
+        assert!(!monitor.process_reading(higher, t0 + Duration::from_millis(2500), &ActiveThresholds::default()));
 
         // 2.0s after jump (t0 + 3.0s): settled! Returns true and commits new baseline
-        assert!(monitor.process_reading(higher, t0 + Duration::from_secs(3)));
+        assert!(monitor.process_reading(higher, t0 + Duration::from_secs(3), &ActiveThresholds::default()));
 
         // Subsequent readings at the new baseline are ignored as steady state
-        assert!(!monitor.process_reading(higher, t0 + Duration::from_millis(3200)));
+        assert!(!monitor.process_reading(higher, t0 + Duration::from_millis(3200), &ActiveThresholds::default()));
     }
 
     #[test]
@@ -1642,7 +1804,7 @@ mod tests {
         let mut monitor = SettledMonitor::new(Duration::from_secs(2));
         let t0 = Instant::now();
         let baseline = sample_reading();
-        assert!(monitor.process_reading(baseline, t0));
+        assert!(monitor.process_reading(baseline, t0, &ActiveThresholds::default()));
 
         // Rapid USB-PD steps: 30W -> 45W -> 28W -> 65W within 1 second
         let r1 = with_real_power(baseline, 30.0);
@@ -1650,13 +1812,13 @@ mod tests {
         let r3 = with_real_power(baseline, 28.0);
         let r4 = with_real_power(baseline, 65.0);
 
-        assert!(!monitor.process_reading(r1, t0 + Duration::from_millis(200)));
-        assert!(!monitor.process_reading(r2, t0 + Duration::from_millis(500)));
-        assert!(!monitor.process_reading(r3, t0 + Duration::from_millis(800)));
-        assert!(!monitor.process_reading(r4, t0 + Duration::from_millis(1000)));
+        assert!(!monitor.process_reading(r1, t0 + Duration::from_millis(200), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(r2, t0 + Duration::from_millis(500), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(r3, t0 + Duration::from_millis(800), &ActiveThresholds::default()));
+        assert!(!monitor.process_reading(r4, t0 + Duration::from_millis(1000), &ActiveThresholds::default()));
 
         // Stable at 65W until 2 seconds have passed since t0 + 1000ms (i.e. t0 + 3000ms)
-        assert!(!monitor.process_reading(r4, t0 + Duration::from_millis(2500)));
-        assert!(monitor.process_reading(r4, t0 + Duration::from_millis(3000)));
+        assert!(!monitor.process_reading(r4, t0 + Duration::from_millis(2500), &ActiveThresholds::default()));
+        assert!(monitor.process_reading(r4, t0 + Duration::from_millis(3000), &ActiveThresholds::default()));
     }
 }
