@@ -1,11 +1,14 @@
 import json
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
 from anomaly import (
+    analyze_sources,
     build_baseline,
     combine_measurements,
     extract_features,
@@ -37,6 +40,7 @@ class TestHistoryLoaders(unittest.TestCase):
                 "reactive_power_var": -10.0,
                 "cos_phi": 0.95,
                 "thd_current_pct": 2.0,
+                "thd_voltage_pct": 1.5,
             },
             "heartbeat": False,
         }
@@ -61,6 +65,29 @@ class TestHistoryLoaders(unittest.TestCase):
                 rows,
             )
 
+    def write_jsonl_measurements(self, readings):
+        lines = []
+        for index, reading in enumerate(readings):
+            lines.append(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "received_at": f"2026-09-11T10:{index // 60:02d}:{index % 60:02d}Z",
+                        "readings": [reading],
+                    }
+                )
+            )
+        self.jsonl_path.write_text("\n".join(lines) + "\n")
+
+    def run_cli(self, *arguments):
+        return subprocess.run(
+            [sys.executable, "anomaly.py", *arguments],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def test_jsonl_loading_normalizes_fields(self):
         self.jsonl_path.write_text(
             json.dumps(
@@ -81,6 +108,7 @@ class TestHistoryLoaders(unittest.TestCase):
         self.assertEqual(measurement["total_power"], 123.0)
         self.assertEqual(measurement["timestamp"].tzinfo, timezone.utc)
         self.assertEqual(measurement["l1"]["reactive_power_var"], -10.0)
+        self.assertEqual(measurement["l1"]["thd_voltage_pct"], 1.5)
 
     def test_sqlite_loading_reads_reading_json_and_dedicated_fallbacks(self):
         timestamp = "2026-09-11T10:00:00+00:00"
@@ -183,14 +211,14 @@ class TestHistoryLoaders(unittest.TestCase):
 
     def test_median_and_mad_calculation(self):
         measurements = [
-            {"total_power": value, "l1": {}}
+            {"frequency_hz": value, "l1": {}}
             for value in [1.0, 2.0, 3.0, 4.0, 100.0]
         ]
 
         baseline = build_baseline(measurements, min_valid_samples=1)
 
-        self.assertEqual(baseline["total_power"]["median"], 3.0)
-        self.assertEqual(baseline["total_power"]["mad"], 1.0)
+        self.assertEqual(baseline["frequency_hz"]["median"], 3.0)
+        self.assertEqual(baseline["frequency_hz"]["mad"], 1.0)
 
     def test_stable_baseline_produces_low_scores(self):
         measurements = [self.reading(100.0) for _ in range(30)]
@@ -202,14 +230,43 @@ class TestHistoryLoaders(unittest.TestCase):
         self.assertEqual(result["overall_score"], 0.0)
         self.assertFalse(result["is_anomaly"])
 
-    def test_strong_total_power_deviation_is_detected(self):
+    def test_large_total_power_change_alone_is_not_an_anomaly(self):
         baseline = build_baseline([self.reading(100.0) for _ in range(30)])
 
         result = score_measurement(self.reading(250.0), baseline)
 
+        self.assertFalse(result["is_anomaly"])
+        self.assertNotIn("total_power", result["feature_scores"])
+
+    def test_large_current_change_alone_is_not_an_anomaly(self):
+        baseline = build_baseline([self.reading(100.0) for _ in range(30)])
+        measurement = self.reading(100.0)
+        measurement["l1"]["current_a"] = 100.0
+
+        result = score_measurement(measurement, baseline)
+
+        self.assertFalse(result["is_anomaly"])
+        self.assertNotIn("l1.current_a", result["feature_scores"])
+
+    def test_abnormal_frequency_is_detected(self):
+        baseline = build_baseline([self.reading(100.0) for _ in range(30)])
+        measurement = self.reading(100.0)
+        measurement["frequency_hz"] = 55.0
+
+        result = score_measurement(measurement, baseline)
+
         self.assertTrue(result["is_anomaly"])
-        self.assertEqual(result["strongest_feature"], "total_power")
-        self.assertGreaterEqual(result["feature_scores"]["total_power"], 3.5)
+        self.assertEqual(result["strongest_feature"], "frequency_hz")
+
+    def test_abnormal_voltage_is_detected(self):
+        baseline = build_baseline([self.reading(100.0) for _ in range(30)])
+        measurement = self.reading(100.0)
+        measurement["l1"]["voltage_v"] = 300.0
+
+        result = score_measurement(measurement, baseline)
+
+        self.assertTrue(result["is_anomaly"])
+        self.assertEqual(result["strongest_feature"], "l1.voltage_v")
 
     def test_strong_thd_deviation_is_detected(self):
         baseline = build_baseline([self.reading(100.0) for _ in range(30)])
@@ -220,6 +277,16 @@ class TestHistoryLoaders(unittest.TestCase):
 
         self.assertTrue(result["is_anomaly"])
         self.assertEqual(result["strongest_feature"], "l1.thd_current_pct")
+
+    def test_abnormal_thd_voltage_is_detected_when_available(self):
+        baseline = build_baseline([self.reading(100.0) for _ in range(30)])
+        measurement = self.reading(100.0)
+        measurement["l1"]["thd_voltage_pct"] = 50.0
+
+        result = score_measurement(measurement, baseline)
+
+        self.assertTrue(result["is_anomaly"])
+        self.assertEqual(result["strongest_feature"], "l1.thd_voltage_pct")
 
     def test_delta_total_power_is_calculated(self):
         previous = self.reading(100.0)
@@ -232,12 +299,12 @@ class TestHistoryLoaders(unittest.TestCase):
 
     def test_missing_optional_values_do_not_crash_scoring(self):
         baseline = build_baseline([self.reading(100.0) for _ in range(30)])
-        measurement = {"total_power": 100.0, "l1": {}}
+        measurement = {"total_power": 100.0, "frequency_hz": 50.0, "l1": {}}
 
         result = score_measurement(measurement, baseline)
 
         self.assertTrue(result["scorable"])
-        self.assertIn("total_power", result["feature_scores"])
+        self.assertIn("frequency_hz", result["feature_scores"])
 
     def test_features_with_fewer_than_thirty_samples_are_excluded(self):
         measurements = [self.reading(100.0) for _ in range(30)]
@@ -252,11 +319,12 @@ class TestHistoryLoaders(unittest.TestCase):
 
     def test_mad_zero_uses_standard_deviation_fallback(self):
         measurements = [self.reading(100.0) for _ in range(29)] + [self.reading(101.0)]
+        measurements[-1]["frequency_hz"] = 51.0
 
         baseline = build_baseline(measurements)
 
-        self.assertEqual(baseline["total_power"]["mad"], 0.0)
-        self.assertGreater(baseline["total_power"]["scale"], 0.0)
+        self.assertEqual(baseline["frequency_hz"]["mad"], 0.0)
+        self.assertGreater(baseline["frequency_hz"]["scale"], 0.0)
 
     def test_constant_baseline_identical_value_scores_zero(self):
         baseline = build_baseline([self.reading(100.0) for _ in range(30)])
@@ -267,8 +335,10 @@ class TestHistoryLoaders(unittest.TestCase):
 
     def test_constant_baseline_different_value_scores_high(self):
         baseline = build_baseline([self.reading(100.0) for _ in range(30)])
+        measurement = self.reading(100.0)
+        measurement["frequency_hz"] = 51.0
 
-        result = score_measurement(self.reading(101.0), baseline)
+        result = score_measurement(measurement, baseline)
 
         self.assertGreater(result["overall_score"], 3.5)
         self.assertTrue(result["is_anomaly"])
@@ -292,8 +362,160 @@ class TestHistoryLoaders(unittest.TestCase):
 
         scored = score_history(later_measurements, baseline=baseline)
 
-        self.assertTrue(scored[-1]["is_anomaly"])
+        self.assertFalse(scored[-1]["is_anomaly"])
         self.assertEqual(len(scored), 31)
+
+    def test_cli_jsonl_and_sqlite_together(self):
+        self.write_jsonl_measurements([self.reading(100.0) for _ in range(30)])
+        self.create_database(
+            [("2026-09-11T11:00:00+00:00", 0, 1000.0, 0, json.dumps(self.reading(1000.0)))]
+        )
+
+        result = self.run_cli("--jsonl", str(self.jsonl_path), "--db", str(self.database_path))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("JSONL samples:", result.stdout)
+        self.assertIn("SQLite samples:", result.stdout)
+        self.assertIn("Final baseline:", result.stdout)
+        self.assertIn("Evaluation samples:", result.stdout)
+
+    def test_cli_jsonl_only(self):
+        self.write_jsonl_measurements([self.reading(100.0) for _ in range(30)])
+
+        result = self.run_cli("--jsonl", str(self.jsonl_path), "--db", str(self.root / "missing.db"))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("JSONL samples:       30", result.stdout)
+        self.assertIn("SQLite samples:      0", result.stdout)
+
+    def test_cli_sqlite_only(self):
+        self.create_database(
+            [
+                (f"2026-09-11T10:00:{index:02d}+00:00", index, 100.0, 0, json.dumps(self.reading()))
+                for index in range(30)
+            ]
+        )
+
+        result = self.run_cli("--jsonl", str(self.root / "missing.jsonl"), "--db", str(self.database_path))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("JSONL samples:       0", result.stdout)
+        self.assertIn("SQLite samples:      30", result.stdout)
+
+    def test_cli_missing_sources_are_graceful(self):
+        result = self.run_cli(
+            "--jsonl", str(self.root / "missing.jsonl"), "--db", str(self.root / "missing.db")
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("No usable measurements found", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_cli_custom_threshold_and_result_limit(self):
+        self.write_jsonl_measurements([self.reading(100.0) for _ in range(30)] + [self.reading(1000.0)])
+        anomalous = self.reading(1000.0)
+        anomalous["l1"]["voltage_v"] = 500.0
+        self.create_database(
+            [("2026-09-11T11:00:00+00:00", 0, 1000.0, 0, json.dumps(anomalous))]
+        )
+
+        result = self.run_cli(
+            "--jsonl", str(self.jsonl_path), "--db", str(self.database_path),
+            "--threshold", "0.1", "--limit", "1",
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Threshold:           0.10", result.stdout)
+        self.assertEqual(result.stdout.count("strongest_feature:"), 1)
+
+    def test_cli_anomalies_are_newest_first(self):
+        self.write_jsonl_measurements([self.reading(100.0) for _ in range(30)])
+        first = self.reading(1000.0)
+        first["l1"]["voltage_v"] = 500.0
+        second = self.reading(1100.0)
+        second["l1"]["voltage_v"] = 600.0
+        self.create_database(
+            [
+                ("2026-09-11T11:00:00+00:00", 0, 1000.0, 0, json.dumps(first)),
+                ("2026-09-11T11:01:00+00:00", 60, 1100.0, 0, json.dumps(second)),
+            ]
+        )
+
+        result = self.run_cli(
+            "--jsonl", str(self.jsonl_path), "--db", str(self.database_path),
+            "--threshold", "0.1", "--limit", "10",
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertLess(
+            result.stdout.index("2026-09-11T11:01:00Z"),
+            result.stdout.index("2026-09-11T11:00:00Z"),
+        )
+
+    def test_mixed_sources_build_one_final_baseline(self):
+        jsonl_measurements = [self.reading(100.0) for _ in range(30)]
+        self.write_jsonl_measurements(jsonl_measurements)
+        self.create_database(
+            [
+                (f"2026-09-11T11:00:{index:02d}+00:00", index, 200.0, 0, json.dumps(self.reading(200.0)))
+                for index in range(30)
+            ]
+        )
+
+        analysis = analyze_sources(
+            self.jsonl_path, self.database_path, baseline_prefilter_threshold=6.0
+        )
+
+        self.assertEqual(analysis["total_count"], 60)
+        self.assertGreaterEqual(analysis["baseline_count"], 30)
+        self.assertIn("frequency_hz", analysis["baseline"])
+
+    def test_extreme_samples_are_excluded_and_features_are_reported(self):
+        self.write_jsonl_measurements([self.reading(100.0) for _ in range(30)])
+        self.create_database(
+            [
+                (
+                    "2026-09-11T11:00:00+00:00",
+                    0,
+                    10000.0,
+                    0,
+                    json.dumps(
+                        {
+                            **self.reading(10000.0),
+                            "l1": {**self.reading(10000.0)["l1"], "voltage_v": 500.0},
+                        }
+                    ),
+                )
+            ]
+        )
+
+        analysis = analyze_sources(self.jsonl_path, self.database_path)
+
+        self.assertGreater(analysis["excluded_count"], 0)
+        self.assertIn("l1.voltage_v", analysis["excluded_features"])
+        self.assertLess(analysis["baseline_count"], analysis["total_count"])
+
+    def test_source_identity_does_not_affect_score(self):
+        baseline = build_baseline([self.reading(100.0) for _ in range(30)])
+        jsonl_sample = self.reading(100.0)
+        sqlite_sample = dict(jsonl_sample)
+        sqlite_sample["source"] = "sqlite"
+
+        jsonl_score = score_measurement(jsonl_sample, baseline)
+        sqlite_score = score_measurement(sqlite_sample, baseline)
+
+        self.assertEqual(jsonl_score["overall_score"], sqlite_score["overall_score"])
+
+    def test_stable_mixed_operating_states_have_low_final_anomaly_rate(self):
+        first_state = [self.reading(100.0) for _ in range(30)]
+        second_state = [self.reading(200.0) for _ in range(30)]
+        combined = first_state + second_state
+        baseline = build_baseline(combined)
+
+        scored = score_history(combined, baseline=baseline)
+
+        anomaly_rate = sum(result["is_anomaly"] for result in scored) / len(scored)
+        self.assertLess(anomaly_rate, 0.1)
 
 
 if __name__ == "__main__":
