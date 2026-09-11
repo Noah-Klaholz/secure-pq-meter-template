@@ -4,6 +4,7 @@ import { createOverview } from './overview.js';
 const themeToggle = document.getElementById('theme-toggle');
 const themeStorageKey = 'pq-monitor-theme';
 const themeModes = new Set(['auto', 'light', 'dark']);
+const themeModeOrder = ['auto', 'light', 'dark'];
 const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
 let selectedTheme = 'auto';
 
@@ -19,11 +20,14 @@ function applyTheme(mode) {
   const dark = resolvedTheme === 'dark';
   document.documentElement.dataset.theme = resolvedTheme;
   themeToggle.setAttribute('aria-pressed', String(dark));
-  const label = dark ? 'Switch to light mode' : 'Switch to dark mode';
-  themeToggle.setAttribute('aria-label', label);
-  themeToggle.title = label;
-  themeToggle.querySelector('.theme-toggle-label').textContent = dark ? 'Light mode' : 'Dark mode';
-  themeToggle.querySelector('[aria-hidden]').textContent = dark ? '☀' : '☾';
+  const label = `${selectedTheme[0].toUpperCase()}${selectedTheme.slice(1)} mode`;
+  const nextMode = themeModeOrder[(themeModeOrder.indexOf(selectedTheme) + 1) % themeModeOrder.length];
+  const nextLabel = `${nextMode[0].toUpperCase()}${nextMode.slice(1)} mode`;
+  const action = `Theme mode: ${label}. Activate to select ${nextLabel}`;
+  themeToggle.setAttribute('aria-label', action);
+  themeToggle.title = action;
+  themeToggle.querySelector('.theme-toggle-label').textContent = label;
+  themeToggle.querySelector('[aria-hidden]').textContent = selectedTheme === 'auto' ? '◐' : dark ? '☾' : '☀';
 }
 
 function initialTheme() {
@@ -40,7 +44,7 @@ systemTheme.addEventListener('change', () => {
   if (selectedTheme === 'auto') applyTheme('auto');
 });
 themeToggle.addEventListener('click', () => {
-  const mode = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  const mode = themeModeOrder[(themeModeOrder.indexOf(selectedTheme) + 1) % themeModeOrder.length];
   applyTheme(mode);
   try {
     localStorage.setItem(themeStorageKey, mode);
