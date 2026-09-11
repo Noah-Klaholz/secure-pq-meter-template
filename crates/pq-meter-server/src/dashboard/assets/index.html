@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>Power quality · PQ Monitor</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/assets/styles.css">
@@ -28,7 +28,7 @@
     <main id="main" tabindex="-1">
         <div class="page-heading">
           <div><p id="page-eyebrow" class="eyebrow">POWER QUALITY / LIVE STATE</p><h1 id="page-title" tabindex="-1">Power quality overview</h1><p id="page-subtitle" class="subtitle">Three-phase measurements from the meter, carried over SCION.</p></div>
-          <div class="refresh-area"><span id="connection" class="badge neutral" role="status">Connecting</span><button id="refresh" type="button">↻ <span>Refresh</span></button></div>
+          <div class="refresh-area"><span id="connection" class="badge neutral" role="status">Connecting</span><button id="refresh" type="button">↻ <span>Refresh</span></button><button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="Switch to dark mode" title="Switch to dark mode"><span aria-hidden="true">☾</span><span class="theme-toggle-label">Dark mode</span></button></div>
         </div>
         <div id="notice" class="notice" role="status">Connecting to the local receiver…</div>
         <noscript><p class="notice">Enable JavaScript to display live readings.</p></noscript>
