@@ -607,3 +607,83 @@ async fn history_survives_long_downtime_without_replaying_live_state() {
     assert_eq!(series.samples[0].total_power_watts, 200.0);
     assert!(source.snapshot().unwrap().last_change.is_none());
 }
+
+#[tokio::test]
+async fn forecast_endpoint_accepts_and_serves_predictions() {
+    let source = source();
+    let app = router(source);
+
+    // Initial state has no forecast.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/forecast")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // Post a forecast.
+    let forecast_payload = serde_json::json!({
+        "generated_at": "2026-09-11T10:00:00Z",
+        "horizon_seconds": 15.0,
+        "model_name": "River Online SGDRegressor",
+        "mae": 1.25,
+        "points": [
+            {
+                "at": "2026-09-11T10:00:05Z",
+                "predicted_watts": 142.5,
+                "lower_bound_watts": 138.0,
+                "upper_bound_watts": 147.0
+            },
+            {
+                "at": "2026-09-11T10:00:10Z",
+                "predicted_watts": 143.0,
+                "lower_bound_watts": 137.5,
+                "upper_bound_watts": 148.5
+            }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/forecast")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&forecast_payload).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    // Get the forecast.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/forecast")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 10_000).await.unwrap()).unwrap();
+    assert_eq!(value["model_name"], "River Online SGDRegressor");
+    assert_eq!(value["points"].as_array().unwrap().len(), 2);
+    assert_eq!(value["points"][0]["predicted_watts"], 142.5);
+
+    // History series now includes forecast.
+    let response = app
+        .oneshot(Request::get("/api/v1/history").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+    assert_eq!(value["forecast"]["model_name"], "River Online SGDRegressor");
+    assert_eq!(value["forecast"]["points"].as_array().unwrap().len(), 2);
+}

@@ -1,4 +1,4 @@
-.PHONY: hooks lint test run-server stop-server restart-server run-client client stop-client kill-client build-client-local build-client deploy-client build-pinger deploy-pinger
+.PHONY: hooks lint test run-server stop-server restart-server run-client client stop-client kill-client build-client-local build-client deploy-client build-pinger deploy-pinger forecast
 
 # Installs the git hooks from .pre-commit-config.yaml. Needs the `pre-commit` tool:
 # `pipx install pre-commit`, or your distribution's package.
@@ -143,3 +143,6 @@ deploy-pinger: build-pinger
 		if [ -n "$(PI_PASS)" ]; then echo "Warning: PI_PASS is set but 'sshpass' is not installed. Asking interactively..."; fi; \
 		scp target/aarch64-unknown-linux-gnu/release/pinger $(PI_USER)@$(PI_HOST):$(PI_DEST); \
 	fi
+
+forecast:
+	@./ml/run.sh

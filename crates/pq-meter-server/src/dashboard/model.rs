@@ -4,7 +4,7 @@
 //! should get a separate endpoint and model rather than growing an unbounded snapshot.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     decision::DeviceChange,
@@ -14,6 +14,28 @@ use crate::{
     quality::{self, Limits, Violation},
     transport::GatewayTransport,
 };
+
+/// A multi-step projected forecast of power consumption.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ForecastSeries {
+    pub generated_at: String,
+    pub horizon_seconds: f32,
+    pub model_name: String,
+    pub points: Vec<ForecastPoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mae: Option<f32>,
+}
+
+/// One predicted point in time.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ForecastPoint {
+    pub at: String,
+    pub predicted_watts: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lower_bound_watts: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upper_bound_watts: Option<f32>,
+}
 
 pub trait SnapshotSource: Send + Sync {
     fn rename_device(&self, _id: &str, _name: &str) -> Result<String, RenameError> {
@@ -27,6 +49,14 @@ pub trait SnapshotSource: Send + Sync {
     /// Kept apart from [`SnapshotSource::snapshot`] on purpose: the live view is polled
     /// every second and has to stay small, while the series grows with the window.
     fn history(&self) -> Result<HistorySeries, &'static str>;
+
+    fn update_forecast(&self, _forecast: ForecastSeries) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn forecast(&self) -> Result<Option<ForecastSeries>, &'static str> {
+        Ok(None)
+    }
 }
 
 pub struct LiveMeterSource {
@@ -109,6 +139,8 @@ pub struct HistorySeries {
     pub persistent: bool,
     pub stored_readings: u64,
     pub samples: Vec<HistorySample>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forecast: Option<ForecastSeries>,
 }
 
 /// One point on the dashboard charts. Deliberately narrower than a full reading: this is
@@ -333,6 +365,24 @@ impl SnapshotSource for LiveMeterSource {
             persistent: meter.history_is_persistent(),
             stored_readings: meter.stored_readings(),
             samples,
+            forecast: meter.latest_forecast(),
         })
+    }
+
+    fn update_forecast(&self, forecast: ForecastSeries) -> Result<(), &'static str> {
+        let mut meter = self
+            .meter
+            .lock()
+            .map_err(|_| "meter state is unavailable")?;
+        meter.update_forecast(forecast);
+        Ok(())
+    }
+
+    fn forecast(&self) -> Result<Option<ForecastSeries>, &'static str> {
+        let meter = self
+            .meter
+            .lock()
+            .map_err(|_| "meter state is unavailable")?;
+        Ok(meter.latest_forecast())
     }
 }

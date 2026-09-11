@@ -814,6 +814,19 @@ td.watch {
   stroke:#4a6fa5;
 }
 
+.chart-line.forecast {
+  stroke:#2563eb;
+  stroke-width:1.5;
+  stroke-dasharray:3 2;
+}
+
+.chart-now-marker {
+  stroke:#94a3b8;
+  stroke-width:1;
+  stroke-dasharray:2 2;
+  vector-effect:non-scaling-stroke;
+}
+
 .chart-empty-line {
   stroke:var(--chart-empty);
   stroke-width:1;
@@ -855,6 +868,7 @@ td.watch {
   background:currentColor;
 }
 
+.key.power,
 .key.l1 {
   color:var(--green);
 }
@@ -865,6 +879,16 @@ td.watch {
 
 .key.l3 {
   color:#4a6fa5;
+}
+
+.key.forecast {
+  color:#2563eb;
+}
+
+.key.forecast:before {
+  border-top:2px dashed currentColor;
+  background:transparent;
+  height:0;
 }
 
 .event-list {

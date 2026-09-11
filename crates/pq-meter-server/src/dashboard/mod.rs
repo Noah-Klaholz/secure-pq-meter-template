@@ -35,8 +35,9 @@ pub fn router(source: Arc<dyn SnapshotSource>) -> Router {
         .route("/assets/charts.js", get(|| async { asset("text/javascript; charset=utf-8", include_str!("assets/charts.js")) }))
         .route("/api/v1/state", get(current_state))
         .route("/api/v1/history", get(recent_history))
+        .route("/api/v1/forecast", get(current_forecast).post(update_forecast).put(update_forecast))
         .route("/api/v1/devices/{id}/label", put(rename_device))
-        .layer(DefaultBodyLimit::max(4096))
+        .layer(DefaultBodyLimit::max(65536))
         .with_state(source)
         .layer(middleware::map_response(|mut response: axum::response::Response| async move {
             let headers = response.headers_mut();
@@ -96,6 +97,24 @@ async fn current_state(State(source): State<Arc<dyn SnapshotSource>>) -> impl In
 async fn recent_history(State(source): State<Arc<dyn SnapshotSource>>) -> impl IntoResponse {
     match source.history() {
         Ok(series) => Json(series).into_response(),
+        Err(message) => unavailable(message),
+    }
+}
+
+async fn current_forecast(State(source): State<Arc<dyn SnapshotSource>>) -> impl IntoResponse {
+    match source.forecast() {
+        Ok(Some(forecast)) => Json(forecast).into_response(),
+        Ok(None) => StatusCode::NO_CONTENT.into_response(),
+        Err(message) => unavailable(message),
+    }
+}
+
+async fn update_forecast(
+    State(source): State<Arc<dyn SnapshotSource>>,
+    Json(forecast): Json<model::ForecastSeries>,
+) -> impl IntoResponse {
+    match source.update_forecast(forecast) {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
         Err(message) => unavailable(message),
     }
 }

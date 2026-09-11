@@ -76,18 +76,44 @@ export function createOverview({ onRename } = {}) {
     text('chart-voltage-min', voltage.min == null ? '—' : `${show(voltage.min)} V`);
     text('chart-voltage-max', voltage.max == null ? '—' : `${show(voltage.max)} V`);
 
-    const power = drawChart(byId('chart-power'), {
-      series: [{ tone: 'power', points: samples.map(s => ({ at: at(s), value: s.total_power_watts })) }],
-      window: windowMs,
-      now,
-    });
-    text('chart-power-min', power.min == null ? '—' : `${show(power.min)} W`);
-    text('chart-power-max', power.max == null ? '—' : `${show(power.max)} W`);
-
     const newest = samples[samples.length - 1];
     text('chart-frequency-now', newest ? `${show(newest.frequency_hz, 2)} Hz` : '—');
     text('chart-voltage-now', newest ? `${show(newest.voltage_v[0])} V` : '—');
     text('chart-power-now', newest ? `${show(newest.total_power_watts)} W` : '—');
+
+    const powerSeries = [{ tone: 'power', points: samples.map(s => ({ at: at(s), value: s.total_power_watts })) }];
+    let futureMs = 0;
+    const legendForecast = byId('legend-forecast');
+    const powerSubhead = byId('chart-power-subhead');
+
+    if (history.forecast && Array.isArray(history.forecast.points) && history.forecast.points.length > 0) {
+      futureMs = (history.forecast.horizon_seconds || 15) * 1000;
+      const forecastPoints = history.forecast.points.map(p => ({ at: Date.parse(p.at), value: p.predicted_watts }));
+      if (newest) {
+        forecastPoints.unshift({ at: at(newest), value: newest.total_power_watts });
+      }
+      powerSeries.push({ tone: 'forecast', points: forecastPoints });
+      if (legendForecast) {
+        legendForecast.style.display = 'inline-flex';
+        legendForecast.title = `${history.forecast.model_name || 'Online ML'}${history.forecast.mae != null ? ` (MAE: ${show(history.forecast.mae, 2)} W)` : ''}`;
+      }
+      if (powerSubhead) {
+        const lastForecast = history.forecast.points[history.forecast.points.length - 1];
+        powerSubhead.textContent = `Recorded ${history.window_seconds || 60} s + ${Math.round(futureMs / 1000)} s forecast (${show(lastForecast.predicted_watts)} W)`;
+      }
+    } else {
+      if (legendForecast) legendForecast.style.display = 'none';
+      if (powerSubhead) powerSubhead.textContent = 'Latest recorded 60 s · negative is export';
+    }
+
+    const power = drawChart(byId('chart-power'), {
+      series: powerSeries,
+      window: windowMs,
+      future: futureMs,
+      now,
+    });
+    text('chart-power-min', power.min == null ? '—' : `${show(power.min)} W`);
+    text('chart-power-max', power.max == null ? '—' : `${show(power.max)} W`);
     text('phase-summary', samples.length ? `${integer.format(samples.length)} samples in the last ${history.window_seconds} s` : '—');
   }
 
@@ -140,6 +166,20 @@ export function createOverview({ onRename } = {}) {
       text('history-summary', latest
         ? `Latest recorded window · Last measurement: ${new Date(latest.at).toLocaleString()}. ${series.persistent ? 'All accepted readings are kept in the archive.' : 'History is held in memory only.'}`
         : 'No saved measurements yet. New readings will appear here.');
+
+      const forecastCard = byId('ml-forecast-card');
+      if (forecastCard) {
+        if (series.forecast && Array.isArray(series.forecast.points) && series.forecast.points.length > 0) {
+          forecastCard.style.display = 'block';
+          text('forecast-model-name', series.forecast.model_name || 'River Streaming Regressor');
+          text('forecast-horizon', `+${Math.round(series.forecast.horizon_seconds || 15)} seconds`);
+          const lastPoint = series.forecast.points[series.forecast.points.length - 1];
+          text('forecast-next-value', `${show(lastPoint.predicted_watts)} W`);
+          text('forecast-mae', series.forecast.mae != null ? `${show(series.forecast.mae, 2)} W` : 'Calibrating…');
+        } else {
+          forecastCard.style.display = 'none';
+        }
+      }
       renderRecentMeasurements(series);
     },
 
