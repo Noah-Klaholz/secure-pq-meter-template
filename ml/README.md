@@ -47,3 +47,50 @@ uv run python ml/predictor.py --server http://127.0.0.1:8080 --interval 1.0 --ho
 ```
 
 If `measurement-history.jsonl` exists in the root directory, the model will automatically warm-start its weights on startup before entering the live loop.
+
+## Power-quality anomaly detection
+
+The standalone anomaly detector identifies unusual electrical quality values. It uses
+robust statistical detection based on feature medians and Median Absolute Deviation (MAD),
+not supervised training or the forecasting model above.
+
+It reads historical JSONL data and current SQLite data, normalizes both sources, removes
+duplicates, and combines them chronologically in memory. The initial robust baseline is
+used to exclude only extreme outliers before the final fixed baseline is built. Source
+files are read only; the detector does not migrate, rewrite, or modify them.
+
+Power-quality anomaly scoring uses only:
+
+```text
+frequency_hz
+l1.voltage_v
+l1.thd_current_pct
+l1.thd_voltage_pct
+```
+
+Load-dependent fields such as total power, current, reactive power, and cos phi remain
+available for NILM/device inference but are intentionally excluded from power-quality
+anomaly scoring. Missing optional sensor values are handled independently per feature;
+one unavailable value does not invalidate the complete measurement.
+
+The report includes the anomaly score, strongest contributing feature, anomaly count and
+anomaly percentage. Run it from the repository root with:
+
+```bash
+python ml/anomaly.py \
+   --jsonl measurement-history.jsonl \
+   --db data/history.db \
+   --threshold 3.5 \
+   --limit 10
+```
+
+### Example result
+
+Example output from the current hackathon dataset (not a universal benchmark):
+
+```text
+Total samples: 520
+Final baseline: 492
+Anomalies detected: 45
+Anomaly percentage: 8.65%
+```
