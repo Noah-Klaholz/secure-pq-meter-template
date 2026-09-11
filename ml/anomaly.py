@@ -88,7 +88,9 @@ def _dedup_key(measurement: dict[str, Any]) -> tuple[datetime, float]:
     return measurement["timestamp"], measurement["total_power"]
 
 
-def combine_measurements(*groups: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def combine_measurements(
+    *groups: Iterable[dict[str, Any]]
+) -> list[dict[str, Any]]:
     """Deduplicate by canonical timestamp and power, preferring JSONL history."""
     combined: dict[tuple[datetime, float], dict[str, Any]] = {}
     for group in groups:
@@ -113,15 +115,30 @@ def load_jsonl_history(path: str | Path) -> list[dict[str, Any]]:
                     raise ValueError("missing timestamp or readings array")
                 for reading in readings:
                     if not isinstance(reading, dict):
-                        logger.warning("Skipping JSONL line %d: reading is not an object", line_number)
+                        logger.warning(
+                            "Skipping JSONL line %d: reading is not an object",
+                            line_number,
+                        )
                         continue
-                    normalized = normalize_measurement(reading, received_at, "jsonl")
+                    normalized = normalize_measurement(
+                        reading, received_at, "jsonl"
+                    )
                     if normalized is None:
-                        logger.warning("Skipping JSONL line %d: reading has no total_power", line_number)
+                        logger.warning(
+                            "Skipping JSONL line %d: reading has no total_power",
+                            line_number,
+                        )
                         continue
                     measurements.append(normalized)
-            except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
-                logger.warning("Skipping malformed JSONL line %d: %s", line_number, error)
+            except (
+                OSError,
+                json.JSONDecodeError,
+                TypeError,
+                ValueError,
+            ) as error:
+                logger.warning(
+                    "Skipping malformed JSONL line %d: %s", line_number, error
+                )
     return sorted(measurements, key=lambda item: item["timestamp"])
 
 
@@ -133,18 +150,30 @@ def load_sqlite_history(path: str | Path) -> list[dict[str, Any]]:
             "SELECT received_at, total_power, heartbeat, reading_json "
             "FROM measurements ORDER BY received_at_epoch ASC, id ASC"
         )
-        for row_number, (received_at, total_power, heartbeat, raw_reading) in enumerate(rows, start=1):
+        for row_number, (
+            received_at,
+            total_power,
+            heartbeat,
+            raw_reading,
+        ) in enumerate(rows, start=1):
             timestamp = _timestamp(received_at)
             if timestamp is None:
-                logger.warning("Skipping SQLite row %d: invalid received_at", row_number)
+                logger.warning(
+                    "Skipping SQLite row %d: invalid received_at", row_number
+                )
                 continue
             try:
                 reading = json.loads(raw_reading)
             except (TypeError, json.JSONDecodeError):
-                logger.warning("Skipping SQLite row %d: malformed reading_json", row_number)
+                logger.warning(
+                    "Skipping SQLite row %d: malformed reading_json", row_number
+                )
                 continue
             if not isinstance(reading, dict):
-                logger.warning("Skipping SQLite row %d: reading_json is not an object", row_number)
+                logger.warning(
+                    "Skipping SQLite row %d: reading_json is not an object",
+                    row_number,
+                )
                 continue
             normalized = normalize_measurement(
                 reading,
@@ -154,7 +183,10 @@ def load_sqlite_history(path: str | Path) -> list[dict[str, Any]]:
                 fallback_heartbeat=heartbeat,
             )
             if normalized is None:
-                logger.warning("Skipping SQLite row %d: reading has no total_power", row_number)
+                logger.warning(
+                    "Skipping SQLite row %d: reading has no total_power",
+                    row_number,
+                )
                 continue
             measurements.append(normalized)
     return sorted(measurements, key=lambda item: item["timestamp"])
@@ -164,7 +196,9 @@ def load_combined_history(
     jsonl_path: str | Path, sqlite_path: str | Path
 ) -> list[dict[str, Any]]:
     """Load both sources, preserving JSONL precedence for duplicate records."""
-    return combine_measurements(load_jsonl_history(jsonl_path), load_sqlite_history(sqlite_path))
+    return combine_measurements(
+        load_jsonl_history(jsonl_path), load_sqlite_history(sqlite_path)
+    )
 
 
 def extract_features(
@@ -229,7 +263,9 @@ def build_baseline(
         median = _median(feature_values)
         mad = _median([abs(value - median) for value in feature_values])
         if mad == 0.0:
-            variance = sum((value - median) ** 2 for value in feature_values) / len(feature_values)
+            variance = sum(
+                (value - median) ** 2 for value in feature_values
+            ) / len(feature_values)
             scale = variance**0.5
         else:
             scale = mad
@@ -294,7 +330,9 @@ def score_history(
     initial_previous: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Score chronologically ordered measurements against a fixed baseline."""
-    statistics = baseline if baseline is not None else build_baseline(measurements)
+    statistics = (
+        baseline if baseline is not None else build_baseline(measurements)
+    )
     scored: list[dict[str, Any]] = []
     previous = initial_previous
     for measurement in measurements:
@@ -341,13 +379,16 @@ def analyze_sources(
             if score >= baseline_prefilter_threshold
             or (
                 initial_baseline[feature]["mad"] == 0
-                and initial_values.get(feature) != initial_baseline[feature]["median"]
+                and initial_values.get(feature)
+                != initial_baseline[feature]["median"]
             )
         ]
         if extreme_features:
             excluded_keys.add(_dedup_key(result["measurement"]))
             for feature in extreme_features:
-                excluded_features[feature] = excluded_features.get(feature, 0) + 1
+                excluded_features[feature] = (
+                    excluded_features.get(feature, 0) + 1
+                )
 
     training_measurements = [
         measurement
@@ -432,9 +473,11 @@ def format_report(analysis: dict[str, Any], limit: int = 10) -> str:
         f"Evaluation samples:  {analysis['evaluation_count']}",
         f"Scorable samples:    {analysis['scorable_count']}",
         f"Anomalies detected:  {len(analysis['anomalies'])}",
-        f"Anomaly percentage:  {100.0 * len(analysis['anomalies']) / analysis['evaluation_count']:.2f}%"
-        if analysis["evaluation_count"]
-        else "Anomaly percentage:  0.00%",
+        (
+            f"Anomaly percentage:  {100.0 * len(analysis['anomalies']) / analysis['evaluation_count']:.2f}%"
+            if analysis["evaluation_count"]
+            else "Anomaly percentage:  0.00%"
+        ),
         f"Threshold:           {analysis['threshold']:.2f}",
         f"Baseline prefilter:  {analysis['baseline_prefilter_threshold']:.2f}",
         "",
@@ -472,11 +515,17 @@ def format_report(analysis: dict[str, Any], limit: int = 10) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Analyze measurement history for anomalies")
-    parser.add_argument("--jsonl", default="data/measurement-history_chris.jsonl")
+    parser = argparse.ArgumentParser(
+        description="Analyze measurement history for anomalies"
+    )
+    parser.add_argument(
+        "--jsonl", default="data/measurement-history_chris.jsonl"
+    )
     parser.add_argument("--db", default="data/history.db")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
-    parser.add_argument("--baseline-prefilter-threshold", type=float, default=6.0)
+    parser.add_argument(
+        "--baseline-prefilter-threshold", type=float, default=6.0
+    )
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--json", action="store_true", help="Print the current result as JSON")
     parser.add_argument("--server", help="Publish to this dashboard URL (e.g. http://127.0.0.1:8080)")
