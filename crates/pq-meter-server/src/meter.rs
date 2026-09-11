@@ -128,7 +128,7 @@ impl MeterState {
         if !self.catalog.iter().any(|device| device.id == id) {
             return Err(RenameError::NotFound);
         }
-        // Commit the file before exposing the change to any dashboard client.
+        // Commit the labels before exposing the change to any dashboard client.
         let mut labels = self.labels.clone();
         labels.names.insert(id.to_owned(), name.to_owned());
         labels.save().map_err(|error| {
