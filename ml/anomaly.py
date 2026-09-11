@@ -7,9 +7,11 @@ import argparse
 import json
 import logging
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -381,6 +383,33 @@ def _display_timestamp(timestamp: datetime) -> str:
     return timestamp.isoformat().replace("+00:00", "Z")
 
 
+def current_result(analysis: dict[str, Any]) -> dict[str, Any] | None:
+    """Expose the latest measurement's result, never an older anomaly event."""
+    if not analysis["scored"]:
+        return None
+    latest = analysis["scored"][-1]
+    if not latest["scorable"]:
+        return None
+    return {
+        "is_anomaly": latest["is_anomaly"],
+        "score": latest["overall_score"],
+        "strongest_feature": latest["strongest_feature"],
+        "timestamp": _display_timestamp(latest["measurement"]["timestamp"]),
+    }
+
+
+def publish_result(server: str, result: dict[str, Any] | None) -> None:
+    """Publish the current result, or clear the dashboard when it is unscorable."""
+    request = Request(
+        f"{server.rstrip('/')}/api/v1/anomaly",
+        data=json.dumps(result, allow_nan=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=5) as response:
+        response.read()
+
+
 def format_report(analysis: dict[str, Any], limit: int = 10) -> str:
     """Format an analysis result for terminal output."""
     baseline = analysis["baseline"]
@@ -449,17 +478,36 @@ def main() -> None:
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--baseline-prefilter-threshold", type=float, default=6.0)
     parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--json", action="store_true", help="Print the current result as JSON")
+    parser.add_argument("--server", help="Publish to this dashboard URL (e.g. http://127.0.0.1:8080)")
+    parser.add_argument("--interval", type=float, help="Repeat analysis/publishing every N seconds")
     args = parser.parse_args()
-    analysis = analyze_sources(
-        args.jsonl,
-        args.db,
-        threshold=args.threshold,
-        baseline_prefilter_threshold=args.baseline_prefilter_threshold,
-    )
-    if analysis["total_count"] == 0:
-        print("No usable measurements found in the requested history sources.")
-        return
-    print(format_report(analysis, limit=args.limit), end="")
+    if args.interval is not None and not (0 < args.interval < float("inf")):
+        parser.error("--interval must be a finite positive number")
+    while True:
+        try:
+            analysis = analyze_sources(
+                args.jsonl,
+                args.db,
+                threshold=args.threshold,
+                baseline_prefilter_threshold=args.baseline_prefilter_threshold,
+            )
+            result = current_result(analysis)
+            if args.server:
+                publish_result(args.server, result)
+            if args.json or args.server:
+                print(json.dumps(result, allow_nan=False), flush=True)
+            elif analysis["total_count"] == 0:
+                print("No usable measurements found in the requested history sources.")
+            else:
+                print(format_report(analysis, limit=args.limit), end="")
+        except (OSError, ValueError) as error:
+            if args.interval is None:
+                raise
+            logger.warning("Anomaly update failed; retrying: %s", error)
+        if args.interval is None:
+            return
+        time.sleep(args.interval)
 
 
 if __name__ == "__main__":

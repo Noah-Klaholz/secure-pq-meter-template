@@ -5,12 +5,15 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from threading import Thread
 
 from anomaly import (
     analyze_sources,
     build_baseline,
     combine_measurements,
+    current_result,
     extract_features,
     load_jsonl_history,
     load_sqlite_history,
@@ -87,6 +90,67 @@ class TestHistoryLoaders(unittest.TestCase):
             text=True,
             check=False,
         )
+
+    def test_current_result_does_not_reuse_an_older_scorable_reading(self):
+        self.assertIsNone(current_result({"scored": []}))
+        self.assertIsNone(current_result({"scored": [
+            {"scorable": True, "is_anomaly": True},
+            {"scorable": False},
+        ]}))
+
+    def test_cli_publishes_current_json_and_clears_when_unscorable(self):
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append((
+                    self.path,
+                    self.headers.get("Content-Type"),
+                    json.loads(self.rfile.read(int(self.headers["Content-Length"]))),
+                ))
+                self.send_response(202)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        self.create_database([])
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            readings = [self.reading() for _ in range(30)]
+            readings.append(self.reading(frequency_hz=51.0))
+            for expected in (True, False, None):
+                if expected is False:
+                    readings.append(self.reading())
+                elif expected is None:
+                    readings.append({"total_power": 100.0})
+                self.write_jsonl_measurements(readings)
+                result = self.run_cli(
+                    "--jsonl", str(self.jsonl_path), "--db", str(self.database_path),
+                    "--server", f"http://127.0.0.1:{server.server_port}",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(received[-1], ("/api/v1/anomaly", "application/json", payload))
+                if expected is None:
+                    self.assertIsNone(payload)
+                else:
+                    self.assertEqual(set(payload), {"is_anomaly", "score", "strongest_feature", "timestamp"})
+                    self.assertEqual(payload["is_anomaly"], expected)
+                    self.assertEqual(payload["strongest_feature"], "frequency_hz")
+                    self.assertEqual(payload["timestamp"], f"2026-09-11T10:00:{len(readings) - 1:02d}Z")
+                    self.assertEqual(payload["score"] > 3.5, expected)
+            result = self.run_cli(
+                "--jsonl", str(self.jsonl_path), "--db", str(self.database_path), "--json",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIsNone(json.loads(result.stdout))
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
 
     def test_jsonl_loading_normalizes_fields(self):
         self.jsonl_path.write_text(
