@@ -72,18 +72,6 @@ $$
 z > 3.5
 $$
 
-A new measurement is then assigned a robust z-score:
-
-$begin:math:display$
-z\_\{\\mathrm\{robust\}\}
-\=
-0\.6745 \\cdot
-\\frac\{\\left\|x \- \\operatorname\{median\}\(x\)\\right\|\}
-\{\\mathrm\{MAD\}\}
-$end:math:display$
-
-A measurement is considered anomalous when its score exceeds the configured threshold. The default threshold is `3.5`.
-
 ### Power-quality features
 
 Anomaly detection intentionally focuses on electrical quality rather than changes caused by devices switching on or off:
