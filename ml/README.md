@@ -50,72 +50,126 @@ If `measurement-history.jsonl` exists in the root directory, the model will auto
 
 ## Power-quality anomaly detection
 
-The standalone anomaly detector identifies unusual electrical quality values. It uses
-robust statistical detection based on feature medians and Median Absolute Deviation (MAD),
-not supervised training or the forecasting model above.
+The anomaly detector monitors electrical power-quality measurements and identifies unusual deviations from normal operating conditions.
 
-It reads historical JSONL data and current SQLite data, normalizes both sources, removes
-duplicates, and combines them chronologically in memory. The initial robust baseline is
-used to exclude only extreme outliers before the final fixed baseline is built. Source
-files are read only; the detector does not migrate, rewrite, or modify them.
+Instead of using a supervised machine-learning model, the detector uses **robust statistical anomaly detection based on the Median Absolute Deviation (MAD)**. This approach works well for the available unlabeled measurement data and is less sensitive to extreme values than methods based on the mean and standard deviation.
 
-Power-quality anomaly scoring uses only:
+For each power-quality feature, the median and Median Absolute Deviation (MAD) of the baseline are calculated:
 
-```text
-frequency_hz
-l1.voltage_v
-l1.thd_current_pct
-l1.thd_voltage_pct
-```
+$$
+MAD = \mathrm{median}(|x_i - \mathrm{median}(x)|)
+$$
 
-Load-dependent fields such as total power, current, reactive power, and cos phi remain
-available for NILM/device inference but are intentionally excluded from power-quality
-anomaly scoring. Missing optional sensor values are handled independently per feature;
-one unavailable value does not invalidate the complete measurement.
+A new measurement is then assigned a robust z-score:
 
-The report includes the anomaly score, strongest contributing feature, anomaly count and
-anomaly percentage. Run it from the repository root with:
+$$
+z = 0.6745 \frac{|x - \mathrm{median}(x)|}{MAD}
+$$
+
+A measurement is considered anomalous when:
+
+$$
+z > 3.5
+$$
+
+A new measurement is then assigned a robust z-score:
+
+$begin:math:display$
+z\_\{\\mathrm\{robust\}\}
+\=
+0\.6745 \\cdot
+\\frac\{\\left\|x \- \\operatorname\{median\}\(x\)\\right\|\}
+\{\\mathrm\{MAD\}\}
+$end:math:display$
+
+A measurement is considered anomalous when its score exceeds the configured threshold. The default threshold is `3.5`.
+
+### Power-quality features
+
+Anomaly detection intentionally focuses on electrical quality rather than changes caused by devices switching on or off:
+
+- `frequency_hz`
+- `l1.voltage_v`
+- `l1.thd_current_pct`
+- `l1.thd_voltage_pct`
+
+Load-dependent values such as real power, current, reactive power and power factor (`cos_phi`) are excluded from anomaly scoring. These values remain available to the separate NILM/device-inference component.
+
+This separation allows the two components to answer different questions:
+
+- **NILM:** What changed in the electrical load?
+- **Anomaly detection:** Is the electrical power quality unusual?
+
+### Baseline
+
+The detector reads measurements from historical JSONL data and the current SQLite history. Both sources are normalized, deduplicated and combined chronologically in memory.
+
+An initial robust baseline is created from the available measurements. Extreme outliers are removed before constructing the final fixed baseline, preventing individual abnormal measurements from distorting the reference distribution.
+
+Missing optional measurements are handled independently per feature. For example, a missing THD value does not invalidate voltage or frequency measurements from the same sample.
+
+### Why robust statistics?
+
+An ML-based approach using scikit-learn was initially considered for anomaly detection. However, the available hackathon dataset was small, unlabeled and contained multiple normal operating states.
+
+Early experiments showed that treating different measurement sessions as separate normal/anomalous distributions produced excessive false positives. We therefore chose a robust MAD-based approach that is easier to interpret and better suited to the available data.
+
+An ML-based detector such as Isolation Forest remains an option for future work once a larger and more representative dataset is available.
+
+### Usage
+
+Run the detector from the repository root:
 
 ```bash
-python ml/anomaly.py \
-   --jsonl data/measurement-history_chris.jsonl \
-   --db data/history.db \
-   --threshold 3.5 \
-   --limit 10
+python3 ml/anomaly.py \
+  --jsonl data/measurement-history_chris.jsonl \
+  --db data/history.db \
+  --threshold 3.5 \
+  --limit 10
 ```
 
-### Dashboard connection
+The report includes the detected anomalies, their scores and the strongest contributing power-quality feature.
 
-The terminal report alone does not update the Supply status card. With the Rust
-server running, start a separate publisher from the repository root:
+### Dashboard integration
+
+The detector can publish its latest result to the dashboard while continuously monitoring the measurement history:
 
 ```bash
-python3 ml/anomaly.py --db data/history.db \
-  --jsonl data/measurement-history-colleague.jsonl \
-  --server http://127.0.0.1:8080 --interval 2
+python3 ml/anomaly.py \
+  --jsonl data/measurement-history_chris.jsonl \
+  --db data/history.db \
+  --server http://127.0.0.1:8080 \
+  --interval 2
 ```
 
-Use the server's actual `--history-file` path for `--db` and the desired baseline
-history for `--jsonl`. Omit `--interval` to publish once; use `--json` without
-`--server` to print the current result without publishing it.
-
-The publisher maps the latest measurement's `overall_score` to `score` and sends
-`is_anomaly`, `score`, `strongest_feature`, and the measurement `timestamp` to
-`POST /api/v1/anomaly`. `GET /api/v1/anomaly` returns that result, and the existing
-`GET /api/v1/state` poll includes it as `power_quality.anomaly` for the card.
-No readings or an unscorable latest reading produces JSON `null`, clearing the
-stored result so the card stays Waiting rather than reporting a false NORMAL.
-State is in memory: before the first publish or after a clear, the anomaly GET
-returns 204. Keep the publisher running for updates and to repopulate state after
-a server restart; the timestamp identifies the measurement, not the publish time.
-
-### Example result
-
-Example output from the current hackathon dataset (not a universal benchmark):
+The latest result is published to:
 
 ```text
-Total samples: 520
-Final baseline: 492
-Anomalies detected: 45
-Anomaly percentage: 8.65%
+POST /api/v1/anomaly
 ```
+
+and contains:
+
+```text
+is_anomaly
+score
+strongest_feature
+timestamp
+```
+
+The dashboard displays this result in the **Supply status** card. If no scorable measurement is available, no anomaly state is reported instead of incorrectly displaying `NORMAL`.
+
+The anomaly state is kept in memory by the server, so the publisher should remain running to provide continuous updates and restore the state after a server restart.
+
+### Example
+
+During the hackathon dataset evaluation, the detector processed 520 measurements:
+
+| Metric | Result |
+|---|---:|
+| Total measurements | 520 |
+| Final baseline | 492 |
+| Detected anomalies | 45 |
+| Anomaly rate | 8.65% |
+
+These results describe the available hackathon dataset and are **not intended as a general performance benchmark**.
